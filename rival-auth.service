@@ -1,0 +1,13 @@
+[Unit]
+Description=Rival Auth Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rival-auth -config /etc/rival/auth.json
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

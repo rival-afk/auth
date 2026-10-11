@@ -1,0 +1,6 @@
+# build artifacts
+auth-linux-amd64
+auth-*
+# real deploy config + secrets (never commit)
+auth.json
+net_token.txt

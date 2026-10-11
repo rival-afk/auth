@@ -1,0 +1,36 @@
+{
+  "domain": "auth.rival-afk.com",
+  "acme_email": "admin@rival-afk.com",
+  "acme_cache": "/var/lib/rival/acme",
+  "db": "/var/lib/rival/auth.db",
+  "jwt_secret_file": "/etc/rival/jwt.secret",
+  "plain_listen": ":8080",
+  "provisioner": "/etc/rival/provisioner",
+  "bootstrap_admin_pubkey": "ssh-ed25519 AAAA...REPLACE-WITH-ADMIN-ED25519-PUBKEY rsh-auth",
+  "net_token": "REPLACE-WITH-RANDOM-NET-TOKEN",
+  "hosts": {
+    "vps": {
+      "addr": "0.0.0.0",
+      "port": 22,
+      "user": "root",
+      "local": true
+    },
+    "phone": {
+      "addr": "127.0.0.1",
+      "port": 8022,
+      "user": "u0_a165",
+      "local": false
+    },
+    "pc": {
+      "addr": "127.0.0.1",
+      "port": 2222,
+      "user": "root",
+      "local": false
+    }
+  },
+  "jump": {
+    "addr": "0.0.0.0",
+    "port": 22,
+    "user": "root"
+  }
+}
