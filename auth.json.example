@@ -1,5 +1,6 @@
 {
   "domain": "auth.rival-afk.com",
+  "domains": ["auth.rival-afk.com", "rival-afk.com", "www.rival-afk.com", "mc.rival-afk.com", "mind.rival-afk.com", "ssh.rival-afk.com"],
   "acme_email": "admin@rival-afk.com",
   "acme_cache": "/var/lib/rival/acme",
   "db": "/var/lib/rival/auth.db",

@@ -37,6 +37,7 @@ type JumpCfg struct {
 
 type Config struct {
 	Domain         string              `json:"domain"`
+	Domains        []string            `json:"domains"`
 	ACMEEmail      string              `json:"acme_email"`
 	ACMECache      string              `json:"acme_cache"`
 	DB             string              `json:"db"`
@@ -638,6 +639,8 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /stats", s.statsJSONHandler)
+	mux.HandleFunc("GET /", s.rootHandler)
 	mux.HandleFunc("POST /v1/auth", s.authHandler)
 	mux.HandleFunc("POST /v1/sshkey", s.sshkeyHandler)
 	mux.HandleFunc("GET /v1/admin/keys", s.adminKeysHandler)
@@ -688,10 +691,17 @@ func main() {
 		}()
 	}
 
-	if cfg.Domain != "" {
+	if len(cfg.Domains) > 0 || cfg.Domain != "" {
+		domains := cfg.Domains
+		if len(domains) == 0 {
+			domains = []string{cfg.Domain}
+		}
+		if cfg.Domain != "" && !containsStr(domains, cfg.Domain) {
+			domains = append(domains, cfg.Domain)
+		}
 		m := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
-			HostPolicy: autocert.HostWhitelist(cfg.Domain),
+			HostPolicy: autocert.HostWhitelist(domains...),
 			Cache:      autocert.DirCache(cfg.ACMECache),
 			Email:      cfg.ACMEEmail,
 		}
@@ -706,11 +716,20 @@ func main() {
 			Handler:   handler,
 			TLSConfig: m.TLSConfig(),
 		}
-		log.Printf("https on :443 (autocert for %s)", cfg.Domain)
+		log.Printf("https on :443 (autocert for %v)", domains)
 		if err := https.ListenAndServeTLS("", ""); err != nil {
 			log.Fatalf("https: %v", err)
 		}
 	} else {
 		select {}
 	}
+}
+
+func containsStr(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
