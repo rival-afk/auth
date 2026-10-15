@@ -72,6 +72,7 @@ func (s *Server) issueWebCookie(w http.ResponseWriter, c *Claims) {
 		Name:     webCookie,
 		Value:    tok,
 		Path:     "/",
+		Domain:   ".rival-afk.com",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -202,7 +203,7 @@ func (s *Server) webLoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) webLogoutHandler(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: webCookie, Value: "", Path: "/", HttpOnly: true, Secure: true, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: webCookie, Value: "", Path: "/", Domain: ".rival-afk.com", HttpOnly: true, Secure: true, MaxAge: -1})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -641,31 +642,39 @@ func (s *Server) sshWS(w http.ResponseWriter, r *http.Request, user, keyPath str
 
 // ---- HTML pages (black & white, servera.sh style) ----
 
-const bwCSS = `body{margin:0;padding:12px 16px;background:#000;color:#e8e8e8;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;touch-action:manipulation;-webkit-text-size-adjust:100%}
+const bwCSS = `@font-face{font-family:Inter;font-style:normal;font-weight:400;font-display:swap;src:url(/console/inter-400.ttf) format('truetype')}
+@font-face{font-family:Inter;font-style:normal;font-weight:500;font-display:swap;src:url(/console/inter-500.ttf) format('truetype')}
+@font-face{font-family:Inter;font-style:normal;font-weight:700;font-display:swap;src:url(/console/inter-700.ttf) format('truetype')}
+@font-face{font-family:Gasoek;font-style:normal;font-weight:400;font-display:swap;src:url(/console/gasoek.ttf) format('truetype')}
+body{margin:0;padding:12px 16px;background:#000;color:#e8e8e8;font:14px/1.5 Inter,ui-monospace,Menlo,Consolas,monospace;touch-action:manipulation;-webkit-text-size-adjust:100%}
 *{box-sizing:border-box}
 a{color:#fff}a:hover{background:#fff;color:#000}
-.box{border:1px solid #555;padding:10px 14px;margin:12px 0}
-button,.btn{background:#000;color:#fff;border:1px solid #fff;padding:6px 16px;font:13px ui-monospace,monospace;cursor:pointer;text-decoration:none;display:inline-block;-webkit-appearance:none;appearance:none}
+.box{border:1px solid #555;padding:10px 14px;margin:12px 0;overflow-wrap:break-word;word-break:break-word}
+button,.btn{background:#000;color:#fff;border:1px solid #fff;padding:6px 16px;font:13px Inter,ui-monospace,monospace;cursor:pointer;text-decoration:none;display:inline-block;-webkit-appearance:none;appearance:none}
 button:hover,.btn:hover{background:#fff;color:#000}
 button:disabled{border-color:#555;color:#555;cursor:default}
-input,textarea,select{background:#000;color:#fff;border:1px solid #555;padding:6px 8px;font:13px ui-monospace,monospace;-webkit-appearance:none;appearance:none;border-radius:0}
+input,textarea,select{background:#000;color:#fff;border:1px solid #555;padding:6px 8px;font:13px Inter,ui-monospace,monospace;-webkit-appearance:none;appearance:none;border-radius:0;max-width:100%}
 input::placeholder,textarea::placeholder{color:#555}
 input:focus,textarea:focus,select:focus{outline:none;border-color:#fff}
-input[type=file]{background:#000;color:#888;border:1px solid #555;padding:4px 6px;font:12px ui-monospace,monospace;width:100%}
-input[type=file]::file-selector-button{background:#000;color:#fff;border:1px solid #fff;padding:5px 14px;font:12px ui-monospace,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none;appearance:none}
+input[type=file]{background:#000;color:#888;border:1px solid #555;padding:4px 6px;font:12px Inter,ui-monospace,monospace;width:100%}
+input[type=file]::file-selector-button{background:#000;color:#fff;border:1px solid #fff;padding:5px 14px;font:12px Inter,ui-monospace,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none;appearance:none}
 input[type=file]::file-selector-button:hover{background:#fff;color:#000}
 input[type=file]:hover{border-color:#888}
-input[type=file]::-webkit-file-upload-button{background:#000;color:#fff;border:1px solid #fff;padding:5px 14px;font:12px ui-monospace,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none}
+input[type=file]::-webkit-file-upload-button{background:#000;color:#fff;border:1px solid #fff;padding:5px 14px;font:12px Inter,ui-monospace,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none}
 input[type=file]::-webkit-file-upload-button:hover{background:#fff;color:#000}
-table{border-collapse:collapse;width:100%%}td,th{border:1px solid #444;padding:4px 10px;text-align:left}
+table{border-collapse:collapse;width:100%;table-layout:fixed}td,th{border:1px solid #444;padding:4px 10px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0}
+td:nth-child(3),th:nth-child(3){white-space:normal;word-break:break-all}
 .dim{color:#888}
-.msg{border:1px solid #555;padding:6px 10px;margin:8px 0;min-height:1.2em}
+.msg{border:1px solid #555;padding:6px 10px;margin:8px 0;min-height:1.2em;overflow-wrap:break-word;word-break:break-word}
 .msg:empty:before{content:attr(data-ph);color:#555}
-#term,#sterm{border:1px solid #555;padding:4px;height:420px;margin:10px 0}
+#term,#sterm{border:1px solid #555;padding:4px;height:420px;margin:10px 0;overflow:hidden}
 pre{margin:0;overflow-x:auto}
+.banner{font-family:Gasoek,ui-monospace,monospace;font-size:clamp(3px,1.1vw,13px);line-height:1.15;overflow:hidden;white-space:pre;margin:8px 0}
 xterm{height:100%}
 .xterm .xterm-viewport{background:#000!important}
-.xterm-rows{font-family:ui-monospace,Menlo,Consolas,monospace!important}`
+.xterm-rows{font-family:ui-monospace,Menlo,Consolas,monospace!important}
+.xterm{user-select:text;-webkit-user-select:text}
+.xterm .xterm-screen{user-select:text;-webkit-user-select:text}`
 
 func htmlEsc(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
@@ -682,12 +691,12 @@ func (s *Server) loginPageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	page := `<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — login</title><style>` + bwCSS + `</style></head><body oncontextmenu="return false">
-<pre>
- __  __ ___ _   _ ____  _   _ ____ _____ ______   __
-|  \/  |_ _| \ | |  _ \| | | / ___|_   _|  _ \ \ / /
-| |\/| || ||  \| | | | | | | \___ \ | | | |_) \ V /
-| |  | || || |\  | |_| | |_| |___) || | |  _ < | |
-|_|  |_|___|_| \_|____/ \___/|____/ |_| |_| \_\|_|
+<pre class=banner> _   _   _ _____ _   _
+| | | | | |_   _| | | |
+| | | |_| | | | | |_| |
+| | |  _  | | | |  _  |
+| |_| | | | | | | | | |
+ \___/|_| |_| |_| |_| |_|
 </pre>
 <div class=box style="max-width:560px">
 <p><b>account</b></p>
@@ -932,9 +941,8 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	b.WriteString(`<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — console</title><style>`)
 	b.WriteString(bwCSS)
-	b.WriteString(`</style><link rel=stylesheet href=/console/xterm.min.css></head><body oncontextmenu="return false">
-<pre>
-  ____ ___  _   _ ____   ___  _     _____
+	b.WriteString(`</style><link rel=stylesheet href=/console/xterm.min.css></head><body oncontextmenu="return event.target.closest('.xterm')!==null">
+<pre class=banner> ____ ___  _   _ ____   ___  _     _____
  / ___/ _ \| \ | / ___| / _ \| |   | ____|
 | |  | | | |  \| \___ \| | | | |   |  _|
 | |__| |_| | |\  |___) | |_| | |___| |___|
@@ -1094,6 +1102,8 @@ func (s *Server) consoleStaticHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css")
 	} else if strings.HasSuffix(name, ".js") {
 		w.Header().Set("Content-Type", "application/javascript")
+	} else if strings.HasSuffix(name, ".ttf") {
+		w.Header().Set("Content-Type", "font/ttf")
 	}
 	w.Write(data)
 }
@@ -1114,8 +1124,7 @@ func (s *Server) errorPageHandler(w http.ResponseWriter, r *http.Request) {
 .sub{margin-top:20px}
 </style></head><body oncontextmenu="return false">
 <div class=center>
-<pre style="font-size:11px;line-height:1.1">
- __  __ ___ _   _ ____  _   _ ____ _____ ______   __
+<pre class=banner style="font-size:clamp(3px,1.1vw,11px)"> __  __ ___ _   _ ____  _   _ ____ _____ ______   __
 |  \/  |_ _| \ | |  _ \| | | / ___|_   _|  _ \ \ / /
 | |\/| || ||  \| | | | | | | \___ \ | | | |_) \ V /
 | |  | || || |\  | |_| | |_| |___) || | |  _ < | |
