@@ -641,20 +641,31 @@ func (s *Server) sshWS(w http.ResponseWriter, r *http.Request, user, keyPath str
 
 // ---- HTML pages (black & white, servera.sh style) ----
 
-const bwCSS = `body{margin:0;background:#000;color:#e8e8e8;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
+const bwCSS = `body{margin:0;padding:12px 16px;background:#000;color:#e8e8e8;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;touch-action:manipulation;-webkit-text-size-adjust:100%}
+*{box-sizing:border-box}
 a{color:#fff}a:hover{background:#fff;color:#000}
 .box{border:1px solid #555;padding:10px 14px;margin:12px 0}
-button,.btn{background:#000;color:#fff;border:1px solid #fff;padding:6px 16px;font:13px ui-monospace,monospace;cursor:pointer;text-decoration:none;display:inline-block}
+button,.btn{background:#000;color:#fff;border:1px solid #fff;padding:6px 16px;font:13px ui-monospace,monospace;cursor:pointer;text-decoration:none;display:inline-block;-webkit-appearance:none;appearance:none}
 button:hover,.btn:hover{background:#fff;color:#000}
 button:disabled{border-color:#555;color:#555;cursor:default}
-input,textarea{background:#000;color:#fff;border:1px solid #555;padding:6px 8px;font:13px ui-monospace,monospace}
+input,textarea,select{background:#000;color:#fff;border:1px solid #555;padding:6px 8px;font:13px ui-monospace,monospace;-webkit-appearance:none;appearance:none;border-radius:0}
 input::placeholder,textarea::placeholder{color:#555}
-input:focus,textarea:focus{outline:none;border-color:#fff}
+input:focus,textarea:focus,select:focus{outline:none;border-color:#fff}
+input[type=file]{background:#000;color:#888;border:1px solid #555;padding:4px 6px;font:12px ui-monospace,monospace;width:100%}
+input[type=file]::file-selector-button{background:#000;color:#fff;border:1px solid #fff;padding:5px 14px;font:12px ui-monospace,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none;appearance:none}
+input[type=file]::file-selector-button:hover{background:#fff;color:#000}
+input[type=file]:hover{border-color:#888}
+input[type=file]::-webkit-file-upload-button{background:#000;color:#fff;border:1px solid #fff;padding:5px 14px;font:12px ui-monospace,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none}
+input[type=file]::-webkit-file-upload-button:hover{background:#fff;color:#000}
 table{border-collapse:collapse;width:100%%}td,th{border:1px solid #444;padding:4px 10px;text-align:left}
 .dim{color:#888}
 .msg{border:1px solid #555;padding:6px 10px;margin:8px 0;min-height:1.2em}
 .msg:empty:before{content:attr(data-ph);color:#555}
-#term,#sterm{border:1px solid #555;padding:4px;height:420px;margin:10px 0}`
+#term,#sterm{border:1px solid #555;padding:4px;height:420px;margin:10px 0}
+pre{margin:0;overflow-x:auto}
+xterm{height:100%}
+.xterm .xterm-viewport{background:#000!important}
+.xterm-rows{font-family:ui-monospace,Menlo,Consolas,monospace!important}`
 
 func htmlEsc(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
@@ -670,7 +681,7 @@ func (s *Server) loginPageHandler(w http.ResponseWriter, r *http.Request) {
 		rd = "https://mind.rival-afk.com/console"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	page := `<!doctype html><html><head><meta charset=utf-8><title>rival — login</title><style>` + bwCSS + `</style></head><body>
+	page := `<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — login</title><style>` + bwCSS + `</style></head><body oncontextmenu="return false">
 <pre>
  __  __ ___ _   _ ____  _   _ ____ _____ ______   __
 |  \/  |_ _| \ | |  _ \| | | / ___|_   _|  _ \ \ / /
@@ -704,6 +715,21 @@ leaves the browser.</p>
 <a class=btn href=/>back</a>
 <input type=hidden id=rd value="` + htmlEsc(rd) + `">
 <script>
+// disable zoom: ctrl+wheel, pinch, double-tap
+document.addEventListener('wheel',(e)=>{if(e.ctrlKey)e.preventDefault()},{passive:false});
+document.addEventListener('touchstart',(e)=>{if(e.touches.length>1)e.preventDefault()},{passive:false});
+let lastTouch=0;
+document.addEventListener('touchend',(e)=>{
+  const now=Date.now();
+  if(now-lastTouch<=300){e.preventDefault()}
+  lastTouch=now;
+},{passive:false});
+document.addEventListener('gesturestart',(e)=>e.preventDefault());
+document.addEventListener('gesturechange',(e)=>e.preventDefault());
+document.addEventListener('gestureend',(e)=>e.preventDefault());
+document.addEventListener('keydown',(e)=>{
+  if((e.ctrlKey||e.metaKey)&&(e.key==='='||e.key==='-'||e.key==='0'||e.code==='Equal'||e.code==='Minus'||e.code==='Digit0'))e.preventDefault();
+});
 const RD=document.getElementById('rd').value;
 const msg=(t)=>document.getElementById('msg').textContent=t||'';
 const b64=(buf)=>btoa(String.fromCharCode(...new Uint8Array(buf)));
@@ -895,9 +921,9 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 	sshUI := hasCap(claims, "ssh")
 
 	var b strings.Builder
-	b.WriteString(`<!doctype html><html><head><meta charset=utf-8><title>rival — console</title><style>`)
+	b.WriteString(`<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — console</title><style>`)
 	b.WriteString(bwCSS)
-	b.WriteString(`</style><link rel=stylesheet href=/console/xterm.min.css></head><body>
+	b.WriteString(`</style><link rel=stylesheet href=/console/xterm.min.css></head><body oncontextmenu="return false">
 <pre>
   ____ ___  _   _ ____   ___  _     _____
  / ___/ _ \| \ | / ___| / _ \| |   | ____|
@@ -954,6 +980,21 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 <script src=/console/xterm.min.js></script>
 <script src=/console/fit.min.js></script>
 <script>
+// disable zoom: ctrl+wheel, pinch, double-tap
+document.addEventListener('wheel',(e)=>{if(e.ctrlKey)e.preventDefault()},{passive:false});
+document.addEventListener('touchstart',(e)=>{if(e.touches.length>1)e.preventDefault()},{passive:false});
+let lastTouch=0;
+document.addEventListener('touchend',(e)=>{
+  const now=Date.now();
+  if(now-lastTouch<=300){e.preventDefault()}
+  lastTouch=now;
+},{passive:false});
+document.addEventListener('gesturestart',(e)=>e.preventDefault());
+document.addEventListener('gesturechange',(e)=>e.preventDefault());
+document.addEventListener('gestureend',(e)=>e.preventDefault());
+document.addEventListener('keydown',(e)=>{
+  if((e.ctrlKey||e.metaKey)&&(e.key==='='||e.key==='-'||e.key==='0'||e.code==='Equal'||e.code==='Minus'||e.code==='Digit0'))e.preventDefault();
+});
 const msg=(t)=>{const e=document.getElementById('msg');if(e)e.textContent=t||''};
 async function j(u,b){const r=await fetch(u,b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{});return r.json()}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}`)
