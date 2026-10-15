@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
   pass_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
-  caps TEXT NOT NULL DEFAULT '["console"]',
+  caps TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL
 );`)
 	if err != nil {

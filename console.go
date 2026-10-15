@@ -402,6 +402,132 @@ func (s *Server) consoleFilesHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{"ok": true, "kind": kind, "dir": dir, "files": files})
 }
 
+// ---- link resolution: GitHub/GitLab page links -> direct file links ----
+
+type ghAsset struct {
+	Name string `json:"name"`
+	URL  string `json:"browser_download_url"`
+}
+type ghRelease struct {
+	TagName string    `json:"tag_name"`
+	Assets  []ghAsset `json:"assets"`
+}
+type ghTree struct {
+	Tree []struct {
+		Path string `json:"path"`
+		Type string `json:"type"`
+	} `json:"tree"`
+}
+
+func httpGetJSON(rawURL string, v interface{}) error {
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "rival-auth")
+	req.Header.Set("Accept", "application/vnd.github+json, application/json")
+	cl := &http.Client{Timeout: 30 * time.Second}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("http %d", resp.StatusCode)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(v)
+}
+
+func assetMatches(name, ext string) bool {
+	ln := strings.ToLower(name)
+	if !strings.HasSuffix(ln, ext) {
+		return false
+	}
+	for _, bad := range []string{"source", "javadoc", "sha256", ".asc", ".sig"} {
+		if strings.Contains(ln, bad) {
+			return false
+		}
+	}
+	return true
+}
+
+func githubReleaseAsset(owner, repo, tag, ext string) (string, string, error) {
+	api := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
+	if tag != "" {
+		api = fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, url.PathEscape(tag))
+	}
+	var rel ghRelease
+	if err := httpGetJSON(api, &rel); err != nil {
+		return "", "", fmt.Errorf("не удалось получить релизы GitHub (%v)", err)
+	}
+	for _, a := range rel.Assets {
+		if assetMatches(a.Name, ext) {
+			return a.URL, a.Name, nil
+		}
+	}
+	for _, a := range rel.Assets {
+		if strings.HasSuffix(strings.ToLower(a.Name), ext) {
+			return a.URL, a.Name, nil
+		}
+	}
+	if len(rel.Assets) > 0 {
+		var names []string
+		for _, a := range rel.Assets {
+			names = append(names, a.Name)
+		}
+		return "", "", fmt.Errorf("в релизе %s нет файла %s (доступно: %s)", rel.TagName, ext, strings.Join(names, ", "))
+	}
+	return "", "", fmt.Errorf("у этого репозитория нет релизов — откройте Releases и скопируйте ссылку на файл %s", ext)
+}
+
+func githubRepoFile(owner, repo, ext string) (string, string, error) {
+	api := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/HEAD?recursive=1", owner, repo)
+	var tr ghTree
+	if err := httpGetJSON(api, &tr); err != nil {
+		return "", "", fmt.Errorf("не удалось прочитать файлы репозитория (%v)", err)
+	}
+	for _, t := range tr.Tree {
+		if t.Type == "blob" && strings.HasSuffix(strings.ToLower(t.Path), ext) {
+			raw := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/HEAD/%s", owner, repo, t.Path)
+			return raw, path.Base(t.Path), nil
+		}
+	}
+	return "", "", fmt.Errorf("в репозитории не найден файл %s — откройте Releases и скопируйте прямую ссылку", ext)
+}
+
+// resolveFetchURL turns a user-supplied link into a direct downloadable file URL.
+// Direct links pass through; repo/release pages are resolved via the GitHub API.
+func resolveFetchURL(raw, ext string) (string, string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", fmt.Errorf("не удалось разобрать ссылку")
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "raw.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com", "gist.githubusercontent.com", "gitlab.com":
+		return raw, path.Base(u.Path), nil
+	case "github.com":
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) < 2 {
+			return "", "", fmt.Errorf("ссылка должна вести на репозиторий, релиз или файл")
+		}
+		owner, repo := parts[0], parts[1]
+		if len(parts) >= 5 && parts[2] == "releases" && parts[3] == "download" {
+			return raw, path.Base(u.Path), nil
+		}
+		if len(parts) >= 5 && parts[2] == "releases" && parts[3] == "tag" {
+			if dl, nm, e := githubReleaseAsset(owner, repo, parts[4], ext); e == nil {
+				return dl, nm, nil
+			}
+			return githubRepoFile(owner, repo, ext)
+		}
+		if dl, nm, e := githubReleaseAsset(owner, repo, "", ext); e == nil {
+			return dl, nm, nil
+		}
+		return githubRepoFile(owner, repo, ext)
+	}
+	return "", "", fmt.Errorf("неподдерживаемая ссылка")
+}
+
 var fetchMu sync.Mutex
 
 func (s *Server) consoleFetchHandler(w http.ResponseWriter, r *http.Request) {
@@ -429,7 +555,7 @@ func (s *Server) consoleFetchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := url.Parse(req.URL)
 	if err != nil || u.Scheme != "https" {
-		writeErr(w, 400, "https url required")
+		writeErr(w, 400, "нужна ссылка https://…")
 		return
 	}
 	allowedHosts := map[string]bool{
@@ -438,10 +564,20 @@ func (s *Server) consoleFetchHandler(w http.ResponseWriter, r *http.Request) {
 		"gist.githubusercontent.com": true, "gitlab.com": true,
 	}
 	if !allowedHosts[strings.ToLower(u.Hostname())] {
-		writeErr(w, 400, "host not allowed (github/gitlab only)")
+		writeErr(w, 400, "поддерживаются только ссылки GitHub/GitLab")
+		return
+	}
+	// GitHub/GitLab *page* links (repo, releases, tag) are HTML — resolve them
+	// to a direct asset/file link for the requested extension.
+	dlURL, resolvedName, rerr := resolveFetchURL(req.URL, ext)
+	if rerr != nil {
+		writeJSON(w, 502, map[string]interface{}{"ok": false, "error": rerr.Error()})
 		return
 	}
 	name := req.Name
+	if name == "" {
+		name = resolvedName
+	}
 	if name == "" {
 		name = path.Base(u.Path)
 	}
@@ -457,7 +593,7 @@ func (s *Server) consoleFetchHandler(w http.ResponseWriter, r *http.Request) {
 	defer fetchMu.Unlock()
 
 	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Get(req.URL)
+	resp, err := client.Get(dlURL)
 	if err != nil {
 		writeJSON(w, 502, map[string]interface{}{"ok": false, "error": "fetch: " + err.Error()})
 		return
@@ -480,8 +616,8 @@ func (s *Server) consoleFetchHandler(w http.ResponseWriter, r *http.Request) {
 	if len(head) > 512 {
 		head = head[:512]
 	}
-	if resp.Header.Get("Content-Type") == "text/html" && !bytes.Contains(head, []byte("PK")) {
-		writeJSON(w, 502, map[string]interface{}{"ok": false, "error": "not a binary file (html page?)"})
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") && !bytes.Contains(head, []byte("PK")) {
+		writeJSON(w, 502, map[string]interface{}{"ok": false, "error": "это HTML-страница, а не файл — нужна прямая ссылка на " + ext + " (обычно: Releases → Assets)"})
 		return
 	}
 
@@ -501,18 +637,22 @@ func (s *Server) consoleFetchHandler(w http.ResponseWriter, r *http.Request) {
 	var stderr bytes.Buffer
 	session.Stderr = &stderr
 	target := dir + "/" + name
-	if err := session.Start("cat > " + target); err != nil {
+	if err := session.Start("mkdir -p " + dir + " && cat > " + target); err != nil {
 		writeJSON(w, 500, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
 	}
-	session.Wait()
-	out, _ := s.mindExec("ls -la " + target + " 2>&1")
-	if !strings.Contains(string(out), name) {
-		writeJSON(w, 500, map[string]interface{}{"ok": false, "error": "upload failed: " + strings.TrimSpace(stderr.String()+" "+string(out))})
+	if err := session.Wait(); err != nil {
+		writeJSON(w, 500, map[string]interface{}{"ok": false, "error": "upload failed: " + strings.TrimSpace(stderr.String()+" "+err.Error())})
 		return
 	}
-	log.Printf("console fetch: %s -> mind@pc:%s (%d bytes)", req.URL, target, len(body))
-	writeJSON(w, 200, map[string]interface{}{"ok": true, "name": name, "size": len(body), "path": target, "note": "restart mindustry to apply"})
+	szOut, _ := s.mindExec("wc -c < " + target + " 2>/dev/null")
+	got, _ := strconv.Atoi(strings.TrimSpace(string(szOut)))
+	if got != len(body) {
+		writeJSON(w, 500, map[string]interface{}{"ok": false, "error": fmt.Sprintf("upload failed: %d of %d bytes", got, len(body))})
+		return
+	}
+	log.Printf("console fetch: %s -> mind@pc:%s (%d bytes)", dlURL, target, len(body))
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "name": name, "size": len(body), "path": target, "note": "перезапустите сервер, чтобы применить"})
 }
 
 func (s *Server) consoleFileDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -703,7 +843,7 @@ td:nth-child(3),th:nth-child(3){white-space:normal;word-break:break-all}
 .msg:empty:before{content:attr(data-ph);color:#555}
 #term,#sterm{border:1px solid #555;padding:4px;height:420px;margin:10px 0;overflow:hidden}
 pre{margin:0;overflow-x:auto}
-.banner{font-family:Gasoek,ui-monospace,monospace;font-size:clamp(3px,1.1vw,13px);line-height:1.15;overflow:hidden;white-space:pre;margin:8px 0}
+.banner{font-family:Gasoek,Inter,sans-serif;font-size:clamp(30px,9vw,60px);line-height:1;letter-spacing:.16em;text-transform:uppercase;font-weight:400;margin:16px 0 18px;overflow-wrap:break-word}
 xterm{height:100%}
 .xterm .xterm-viewport{background:#000!important}
 .xterm-rows{font-family:ui-monospace,Menlo,Consolas,monospace!important}
@@ -725,13 +865,7 @@ func (s *Server) loginPageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	page := `<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — login</title><style>` + bwCSS + `</style></head><body oncontextmenu="return false">
-<pre class=banner> _   _   _ _____ _   _
-| | | | | |_   _| | | |
-| | | |_| | | | | |_| |
-| | |  _  | | | |  _  |
-| |_| | | | | | | | | |
- \___/|_| |_| |_| |_| |_|
-</pre>
+<div class=banner>RIVAL</div>
 <div class=box style="max-width:560px">
 <p><b>account</b></p>
 <input id=un placeholder="username" autocomplete="username" style="width:100%">
@@ -865,6 +999,7 @@ async function passLogin(isReg){
   msg(isReg?'registering…':'logging in…');
   const res=await (await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:un,password:pw})})).json();
   if(res.error){msg(res.error);return}
+  if(isReg){msg(res.message||'account created — waiting for admin approval');return}
   try{
     msg('generating browser key…');
     let rec=await idbGet('default');
@@ -976,54 +1111,72 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — console</title><style>`)
 	b.WriteString(bwCSS)
 	b.WriteString(`</style><link rel=stylesheet href=/console/xterm.min.css></head><body oncontextmenu="return event.target.closest('.xterm')!==null">
-<pre class=banner> ____ ___  _   _ ____   ___  _     _____
- / ___/ _ \| \ | / ___| / _ \| |   | ____|
-| |  | | | |  \| \___ \| | | | |   |  _|
-| |__| |_| | |\  |___) | |_| | |___| |___|
- \____\___/|_| \_|____/ \___/|_____|_____|
-</pre>
+<div class=banner>CONSOLE</div>
 <div class=box><b>mind console</b> — <b>`)
 	b.WriteString(htmlEsc(label))
 	b.WriteString(`</b> &middot; caps: <span class=dim>`)
 	b.WriteString(htmlEsc(strings.Join(claims.Caps, ", ")))
 	b.WriteString(`</span><a class=btn style="float:right" href=/v1/web/logout>logout</a></div>`)
 
+	if !consoleUI && !sshUI {
+		b.WriteString(`<div class=box>
+<b>Доступа пока нет</b>
+<p class=dim>Аккаунт создан, но администратор ещё не выдал доступ к консоли.
+Попросите администратора выдать доступ, затем войдите заново.</p>
+</div>`)
+	}
 	if consoleUI {
 		b.WriteString(`<div class=box>
-<b>service</b> <span id=svc class=dim>…</span>
-<button onclick=svc('start')>start</button>
-<button onclick=svc('stop')>stop</button>
-<button onclick=svc('restart')>restart</button>
+<b>Что это за страница?</b>
+<p class=dim>Это панель управления сервером Mindustry. Обычно нужно только
+«Перезапустить» сервер после установки плагина или карты. Остальное — для продвинутых.</p>
+</div>
+<div class=box>
+<b>Сервер</b> <span id=svc class=dim>…</span>
+<button onclick=svc('start')>Запустить</button>
+<button onclick=svc('restart')>Перезапустить</button>
+<button onclick=svc('stop')>Остановить</button>
 <div class=stat id=stat style="margin-top:6px">…</div>
+<p class=dim style="margin:8px 0 0">«Перезапустить» — применить установленные плагины и карты. «Остановить» выключает сервер.</p>
 </div>
 <div class=box>
-<b>terminal</b> — mind@pc &middot; home=/home/mind (server dir, jailed)
-<button onclick=connect() id=btn>connect</button>
-<button onclick=disconnect() disabled id=dis>disconnect</button>
+<b>Плагины</b> <span class=dim>(файлы .jar)</span>
+<p class=dim style="margin:6px 0">Вставьте ссылку на плагин. Можно ссылку на страницу
+GitHub (репозиторий или релиз) — файл .jar найдётся автоматически. Либо прямую ссылку на .jar.</p>
+<div style="margin:8px 0">
+<input id=purl size=50 placeholder="https://github.com/Kieaer/Essentials">
+<button onclick=fetchFile('plugins')>Установить</button>
+</div>
+<details style="margin:4px 0 8px"><summary class=dim>Как найти ссылку?</summary>
+<p class=dim>1. Откройте страницу плагина на GitHub.<br>
+2. Скопируйте адрес самой страницы — этого достаточно, файл .jar найдётся сам.<br>
+3. Вручную: Releases → нужный релиз → Assets → скопируйте ссылку на файл .jar.</p></details>
+<table id=ptab><tr><th>права</th><th>размер</th><th>файл</th><th></th></tr></table>
+</div>
+<div class=box>
+<b>Карты</b> <span class=dim>(файлы .msav)</span>
+<p class=dim style="margin:6px 0">Так же: ссылка на страницу GitHub или прямая ссылка на файл .msav.</p>
+<div style="margin:8px 0">
+<input id=murl size=50 placeholder="https://github.com/user/repo (или прямая ссылка на .msav)">
+<button onclick=fetchFile('maps')>Установить</button>
+</div>
+<details style="margin:4px 0 8px"><summary class=dim>Как найти ссылку?</summary>
+<p class=dim>Скопируйте адрес страницы репозитория с картой — файл .msav найдётся автоматически.
+Либо используйте прямую ссылку на файл .msav.</p></details>
+<table id=mtab><tr><th>права</th><th>размер</th><th>файл</th><th></th></tr></table>
+</div>
+<div class=box>
+<b>Терминал</b> <span class=dim>(для продвинутых)</span> — mind@pc &middot; домашняя папка /home/mind
+<button onclick=connect() id=btn>Подключиться</button>
+<button onclick=disconnect() disabled id=dis>Отключиться</button>
 <div id=term></div>
-</div>
-<div class=box>
-<b>plugins</b> <span class=dim>(config/plugins/*.jar)</span>
-<div style="margin:8px 0">
-<input id=purl size=50 placeholder="https://github.com/user/repo/releases/download/x/y.jar">
-<button onclick=fetchFile('plugins')>fetch</button>
-</div>
-<table id=ptab><tr><th>perm</th><th>size</th><th>name</th><th></th></tr></table>
-</div>
-<div class=box>
-<b>maps</b> <span class=dim>(config/maps/*.msav)</span>
-<div style="margin:8px 0">
-<input id=murl size=50 placeholder="https://github.com/user/repo/releases/download/x/map.msav">
-<button onclick=fetchFile('maps')>fetch</button>
-</div>
-<table id=mtab><tr><th>perm</th><th>size</th><th>name</th><th></th></tr></table>
 </div>`)
 	}
 	if sshUI {
 		b.WriteString(`<div class=box>
-<b>ssh root@pc</b> <span class=dim>(full root shell)</span>
-<button onclick=sshConnect() id=sbtn>connect</button>
-<button onclick=sshDisconnect() disabled id=sdis>disconnect</button>
+<b>root SSH</b> <span class=dim>(полный root-доступ к ПК — только для админов)</span>
+<button onclick=sshConnect() id=sbtn>Подключиться</button>
+<button onclick=sshDisconnect() disabled id=sdis>Отключиться</button>
 <div id=sterm></div>
 </div>`)
 	}
@@ -1054,11 +1207,11 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 		b.WriteString(`
 async function refresh(){
   const s=await j('/v1/console/status');
-  if(s.error){document.getElementById('stat').textContent='err: '+s.error;return}
-  document.getElementById('stat').textContent='load '+(s.load||'?')+' · '+(s.mem||'')+' · '+(s.disk||'')+' · udp:'+(s.udp==='up'?'on':'off');
+  if(s.error){document.getElementById('stat').textContent='ошибка: '+s.error;return}
+  document.getElementById('stat').textContent='нагрузка '+(s.load||'?')+' · '+(s.mem||'')+' · '+(s.disk||'')+' · udp:'+(s.udp==='up'?'вкл':'выкл');
   document.getElementById('svc').textContent=(s.service||'?');
 }
-async function svc(a){msg('service '+a+'…');const r=await j('/v1/console/service',{action:a});msg(r.ok?('service '+a+' ok'):('service: '+(r.error||'fail')));setTimeout(refresh,1500)}
+async function svc(a){msg('выполняю: '+a+'…');const r=await j('/v1/console/service',{action:a});msg(r.ok?('готово: '+a):('ошибка: '+(r.error||'fail')));setTimeout(refresh,1500)}
 async function ls(kind,tab){
   const r=await j('/v1/console/files?kind='+kind);
   const t=document.getElementById(tab);
@@ -1069,12 +1222,13 @@ async function ls(kind,tab){
     row.innerHTML='<td class=dim>'+esc(f.perm)+'</td><td class=dim>'+esc(f.size)+'</td><td>'+esc(f.name)+'</td><td><button onclick="del(\''+kind+'\',\''+esc(f.name)+'\')">x</button></td>';
   }
 }
-async function del(kind,name){if(!confirm('delete '+name+'?'))return;msg('deleting '+name);await fetch('/v1/console/file?kind='+kind+'&name='+encodeURIComponent(name),{method:'DELETE'});ls(kind,kind==='plugins'?'ptab':'mtab')}
+async function del(kind,name){if(!confirm('Удалить '+name+'?'))return;msg('удаляю '+name+'…');await fetch('/v1/console/file?kind='+kind+'&name='+encodeURIComponent(name),{method:'DELETE'});ls(kind,kind==='plugins'?'ptab':'mtab')}
 async function fetchFile(kind){
   const inp=document.getElementById(kind==='plugins'?'purl':'murl');
-  msg('fetching '+inp.value+' …');
-  const r=await j('/v1/console/fetch',{kind:kind,url:inp.value});
-  msg(r.ok?('saved '+r.name+' ('+r.size+' bytes) — '+r.note):('fetch: '+(r.error||'fail')));
+  if(!inp.value.trim()){msg('вставьте ссылку');return}
+  msg('загружаю…');
+  const r=await j('/v1/console/fetch',{kind:kind,url:inp.value.trim()});
+  msg(r.ok?('Готово: '+r.name+' ('+r.size+' байт). '+r.note):('Ошибка: '+(r.error||'fail')));
   if(r.ok){inp.value='';ls(kind,kind==='plugins'?'ptab':'mtab')}
 }
 let term,fit,ws;
@@ -1158,12 +1312,7 @@ func (s *Server) errorPageHandler(w http.ResponseWriter, r *http.Request) {
 .sub{margin-top:20px}
 </style></head><body oncontextmenu="return false">
 <div class=center>
-<pre class=banner style="font-size:clamp(3px,1.1vw,11px)"> __  __ ___ _   _ ____  _   _ ____ _____ ______   __
-|  \/  |_ _| \ | |  _ \| | | / ___|_   _|  _ \ \ / /
-| |\/| || ||  \| | | | | | | \___ \ | | | |_) \ V /
-| |  | || || |\  | |_| | |_| |___) || | |  _ < | |
-|_|  |_|___|_| \_|____/ \___/|____/ |_| |_| \_\|_|
-</pre>
+<div class=banner>MINDUSTRY</div>
 <p class=code>` + htmlEsc(code) + `</p>
 <p class=msg-big>Ой... что-то сломалось</p>
 <p class=sub><a class=btn href=/>на главную</a></p>

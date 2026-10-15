@@ -76,14 +76,17 @@ func (s *Server) webRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := randID()
-	// every self-registered account is a regular user with console access only
+	// self-registered accounts are regular users with NO capabilities.
+	// console is admin-only and ssh must be granted explicitly by an admin.
 	if _, err := s.db.Exec(`INSERT INTO users (id, username, pass_hash, role, caps, created_at) VALUES (?,?,?,?,?,?)`,
-		id, username, string(hash), "user", `["console"]`, time.Now().Unix()); err != nil {
+		id, username, string(hash), "user", `[]`, time.Now().Unix()); err != nil {
 		writeErr(w, 409, "username taken")
 		return
 	}
-	s.issueWebCookie(w, s.userClaims(id, username, "user", `["console"]`))
-	writeJSON(w, 200, map[string]interface{}{"ok": true, "username": username, "role": "user", "caps": []string{"console"}})
+	writeJSON(w, 200, map[string]interface{}{
+		"ok": true, "username": username, "role": "user", "caps": []string{},
+		"message": "account created — access must be granted by an admin before you can use the console",
+	})
 }
 
 // POST /v1/web/passlogin — username+password.
@@ -104,7 +107,7 @@ func (s *Server) webPassLoginHandler(w http.ResponseWriter, r *http.Request) {
 	var caps []string
 	json.Unmarshal([]byte(capsJSON), &caps)
 	if !containsStr(caps, "console") && !containsStr(caps, "ssh") {
-		writeErr(w, 403, "no console access for this account")
+		writeErr(w, 403, "no access yet — ask an admin to grant console access")
 		return
 	}
 	username := strings.ToLower(strings.TrimSpace(req.Username))
@@ -222,6 +225,20 @@ func validCaps(caps []string) bool {
 	return true
 }
 
+// capsAllowedForRole enforces the privilege model: the web console is admin-only.
+// Regular users may hold "ssh" (host key issuance) but never "console".
+func capsAllowedForRole(role string, caps []string) bool {
+	if role == "admin" {
+		return true
+	}
+	for _, c := range caps {
+		if c == "console" {
+			return false
+		}
+	}
+	return true
+}
+
 // GET/POST /v1/admin/users — bearer-auth admin management of password accounts.
 func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	claims, ok := s.requireAuth(w, r)
@@ -275,11 +292,15 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 		if req.Role != "user" && req.Role != "admin" {
 			req.Role = "user"
 		}
-		if len(req.Caps) == 0 {
-			req.Caps = []string{"console"}
+		if req.Caps == nil {
+			req.Caps = []string{}
 		}
 		if !validCaps(req.Caps) {
 			writeErr(w, 400, "caps must be console and/or ssh")
+			return
+		}
+		if !capsAllowedForRole(req.Role, req.Caps) {
+			writeErr(w, 400, "console is admin-only")
 			return
 		}
 		// hierarchy: cannot grant caps you don't have yourself
@@ -347,6 +368,10 @@ func (s *Server) adminUserUpdateHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	if !validCaps(newCaps) {
 		writeErr(w, 400, "caps must be console and/or ssh")
+		return
+	}
+	if !capsAllowedForRole(newRole, newCaps) {
+		writeErr(w, 400, "console is admin-only")
 		return
 	}
 	// hierarchy: admin can only grant what they have (equal or lower)
