@@ -16,12 +16,12 @@ import (
 )
 
 type statService struct {
-	Name    string `json:"name"`
-	Addr    string `json:"addr"`
-	Up      bool   `json:"up"`
-	Latency int64  `json:"latency_ms"`
-	Detail  string `json:"detail,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Name    string  `json:"name"`
+	Addr    string  `json:"addr"`
+	Up      bool    `json:"up"`
+	Latency float64 `json:"latency_ms"`
+	Detail  string  `json:"detail,omitempty"`
+	Error   string  `json:"error,omitempty"`
 }
 
 type statsResp struct {
@@ -53,9 +53,9 @@ func hostWhat(h string) string {
 	case "auth.rival-afk.com":
 		return "auth API — rsh gateway (keys / tokens / net discovery)"
 	case "mc.rival-afk.com":
-		return "Minecraft entry — reverse-tunnel to the PC :25565; this page shows its status"
+		return "Minecraft entry — WireGuard DNAT to the PC :25565; this page shows its status"
 	case "mind.rival-afk.com":
-		return "Mindustry entry — reverse-tunnel to the PC :6567; this page shows its status"
+		return "Mindustry entry — WireGuard DNAT to the PC :6567; this page shows its status"
 	case "ssh.rival-afk.com":
 		return "SSH retransmit gateway (jump into VPS -> phone -> PC)"
 	default:
@@ -147,10 +147,17 @@ func tcpDialMs(addr string, timeout time.Duration) (time.Duration, net.Conn, err
 	return time.Since(start), c, err
 }
 
+// ms converts a duration to milliseconds with sub-ms precision so that
+// loopback probes do not all collapse to 0.
+func ms(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000.0
+}
+
 func probeSSH(name, addr string, timeout time.Duration) statService {
 	var d time.Duration
 	var c net.Conn
 	var err error
+	start := time.Now()
 	for attempt := 0; attempt < 3; attempt++ {
 		d, c, err = tcpDialMs(addr, timeout)
 		if err == nil {
@@ -159,22 +166,25 @@ func probeSSH(name, addr string, timeout time.Duration) statService {
 		time.Sleep(150 * time.Millisecond)
 	}
 	if err != nil {
-		return statService{Name: name, Addr: addr, Up: false, Latency: d.Milliseconds(), Error: err.Error()}
+		return statService{Name: name, Addr: addr, Up: false, Latency: ms(time.Since(start)), Error: err.Error()}
 	}
 	defer c.Close()
+	rtt := ms(d)
 	detail := "tcp ok"
 	c.SetReadDeadline(time.Now().Add(timeout))
 	br := bufio.NewReader(c)
 	if line, rerr := br.ReadString('\n'); rerr == nil {
 		if l := strings.TrimSpace(line); strings.HasPrefix(l, "SSH-") {
 			detail = l
+			rtt = ms(time.Since(start))
 		}
 	}
-	return statService{Name: name, Addr: addr, Up: true, Latency: d.Milliseconds(), Detail: detail}
+	return statService{Name: name, Addr: addr, Up: true, Latency: rtt, Detail: detail}
 }
 
 func probeMC(name, addr string, timeout time.Duration) statService {
 	d, c, err := tcpDialMs(addr, timeout)
+	start := time.Now().Add(-d)
 	if err != nil {
 		return statService{Name: name, Addr: addr, Up: false, Error: err.Error()}
 	}
@@ -231,7 +241,7 @@ func probeMC(name, addr string, timeout time.Duration) statService {
 			desc = t
 		}
 	}
-	return statService{Name: name, Addr: addr, Up: true, Latency: d.Milliseconds(),
+	return statService{Name: name, Addr: addr, Up: true, Latency: ms(time.Since(start)),
 		Detail: fmt.Sprintf("%s, players %d/%d%s", m.Version.Name, m.Players.Online, m.Players.Max, func() string {
 			if desc != "" {
 				return ", \"" + desc + "\""
@@ -246,7 +256,31 @@ func probeTCP(name, addr string, timeout time.Duration) statService {
 		return statService{Name: name, Addr: addr, Up: false, Error: err.Error()}
 	}
 	c.Close()
-	return statService{Name: name, Addr: addr, Up: true, Latency: d.Milliseconds()}
+	return statService{Name: name, Addr: addr, Up: true, Latency: ms(d)}
+}
+
+// probeMind probes Mindustry with the legacy list-ping (0xFE 0x01) and times
+// the full round trip: over the WireGuard path the connect itself already
+// crosses the VPS↔PC link, so the reply latency is the real game-path RTT.
+func probeMind(name, addr string, timeout time.Duration) statService {
+	start := time.Now()
+	c, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return statService{Name: name, Addr: addr, Up: false, Latency: ms(time.Since(start)), Error: err.Error()}
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(timeout))
+	if _, err := c.Write([]byte{0xFE, 0x01}); err != nil {
+		return statService{Name: name, Addr: addr, Up: false, Latency: ms(time.Since(start)), Error: "ping write: " + err.Error()}
+	}
+	br := bufio.NewReader(c)
+	buf := make([]byte, 32)
+	n, rerr := br.Read(buf)
+	if rerr != nil {
+		return statService{Name: name, Addr: addr, Up: false, Latency: ms(time.Since(start)), Error: "no reply: " + rerr.Error()}
+	}
+	return statService{Name: name, Addr: addr, Up: true, Latency: ms(time.Since(start)),
+		Detail: fmt.Sprintf("mindustry ping ok (%d bytes)", n)}
 }
 
 func (s *Server) gatherStats() statsResp {
@@ -254,9 +288,9 @@ func (s *Server) gatherStats() statsResp {
 	svcs := []statService{
 		probeSSH("vps", "127.0.0.1:22", 2*time.Second),
 		probeSSH("phone(ssh)", "127.0.0.1:8022", 2*time.Second),
-		probeSSH("pc(ssh)", "127.0.0.1:2222", 2*time.Second),
-		probeMC("mc.rival-afk.com", "127.0.0.1:25565", 3*time.Second),
-		probeTCP("mind.rival-afk.com", "127.0.0.1:6567", 2*time.Second),
+		probeSSH("pc(ssh)", "10.66.0.2:22", 2*time.Second),
+		probeMC("mc.rival-afk.com", "10.66.0.2:25565", 3*time.Second),
+		probeMind("mind.rival-afk.com", "10.66.0.2:6567", 3*time.Second),
 		probeTCP("internet(1.1.1.1)", "1.1.1.1:443", 2*time.Second),
 	}
 	peers := []map[string]interface{}{}
@@ -305,13 +339,17 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "<p>%s &middot; %s &middot; %s &middot; up %ss</p>", st.Server["hostname"], st.Server["os"], st.Server["arch"], st.Server["uptime_s"])
 	fmt.Fprintf(&b, "<p>kernel %s &middot; cores %v &middot; load %v/%v/%v &middot; mem %v/%v MB &middot; disk %v</p>",
 		st.Server["kernel"], st.Load["cpu_count"], st.Load["load1"], st.Load["load5"], st.Load["load15"], st.Load["mem_used_mb"], st.Load["mem_total_mb"], st.Load["disk"])
-	b.WriteString("<h3>services</h3><table border=0 cellpadding=4>")
+	b.WriteString("<h3>services</h3>")
+	b.WriteString("<p style='color:#8fb4ff'>ping: <b id=youvps>measuring…</b> = you→vps; each row shows <b>you→vps→device</b> (vps reports its own leg to the device)</p>")
+	b.WriteString("<table border=0 cellpadding=4>")
 	for _, sv := range st.Services {
 		state := "<span style=color:#e5534b>DOWN</span>"
 		if sv.Up {
-			state = "<span style=color:#3fb950>UP</span> " + strconv.FormatInt(sv.Latency, 10) + "ms"
+			state = "<span style=color:#3fb950>UP</span> <span class=lat>" +
+				strconv.FormatFloat(sv.Latency, 'f', 2, 64) + "ms</span>"
 		}
-		fmt.Fprintf(&b, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>", sv.Name, state, sv.Detail, sv.Error)
+		fmt.Fprintf(&b, "<tr data-svc=\"%s\" data-ms=\"%s\"><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+			sv.Name, strconv.FormatFloat(sv.Latency, 'f', 3, 64), sv.Name, state, sv.Detail, sv.Error)
 	}
 	b.WriteString("</table>")
 	if len(st.Services) > 0 {
@@ -324,6 +362,7 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 		b.WriteString("</ul>")
 	}
 	fmt.Fprintf(&b, "<p style='color:#6b7a90'>refreshed %s &middot; json: <a href='/?format=json'>/?format=json</a></p>", time.Now().Format(time.RFC3339))
+	b.WriteString("<script>(async()=>{const f=v=>Number(v).toFixed(2);const el=document.getElementById('youvps');const s=[];for(let i=0;i<3;i++){const t0=performance.now();try{await fetch('/healthz',{cache:'no-store'});}catch(e){}s.push(performance.now()-t0);}const rtt=Math.min(...s);el.textContent=f(rtt)+'ms';document.querySelectorAll('tr[data-ms]').forEach(tr=>{const base=parseFloat(tr.getAttribute('data-ms'))||0;const v=(tr.getAttribute('data-svc')==='vps')?rtt:rtt+base;const lat=tr.querySelector('.lat');if(lat){lat.textContent=f(v)+'ms';lat.title='you→vps '+f(rtt)+'ms + vps→device '+f(base)+'ms';}});})();</script>")
 	b.WriteString("</body>")
 	w.Write([]byte(b.String()))
 }

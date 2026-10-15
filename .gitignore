@@ -4,3 +4,4 @@ auth-*
 # real deploy config + secrets (never commit)
 auth.json
 net_token.txt
+rival-auth-linux-*
