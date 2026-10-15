@@ -56,12 +56,15 @@ type Server struct {
 	db  *sql.DB
 	jwt []byte
 
-	chMu  sync.Mutex
-	chMap map[string]webChallenge
+	chMu    sync.Mutex
+	chMap   map[string]webChallenge
+	bindMu  sync.Mutex
+	bindMap map[string]bindChallenge
 }
 
 type Claims struct {
 	KID   string   `json:"kid"`
+	UN    string   `json:"un,omitempty"`
 	Role  string   `json:"role"`
 	Hosts []string `json:"hosts"`
 	Caps  []string `json:"caps,omitempty"`
@@ -130,6 +133,14 @@ CREATE TABLE IF NOT EXISTS net_peers (
   ip TEXT NOT NULL,
   meta TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  pass_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  caps TEXT NOT NULL DEFAULT '["console"]',
+  created_at INTEGER NOT NULL
 );`)
 	if err != nil {
 		return err
@@ -145,16 +156,22 @@ CREATE TABLE IF NOT EXISTS net_peers (
 			cols = append(cols, n)
 		}
 	}
-	hasCaps := false
+	hasCaps, hasUserID := false, false
 	for _, c := range cols {
 		if c == "caps" {
 			hasCaps = true
+		}
+		if c == "user_id" {
+			hasUserID = true
 		}
 	}
 	if !hasCaps {
 		s.db.Exec(`ALTER TABLE keys ADD COLUMN caps TEXT NOT NULL DEFAULT '[]'`)
 		s.db.Exec(`UPDATE keys SET caps='["console","ssh"]' WHERE label='bootstrap-admin'`)
 		s.db.Exec(`UPDATE keys SET caps='["console"]' WHERE role='admin' AND caps='[]'`)
+	}
+	if !hasUserID {
+		s.db.Exec(`ALTER TABLE keys ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`)
 	}
 	return nil
 }
@@ -702,7 +719,14 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /console/fit.min.js", s.consoleStaticHandler)
 	mux.HandleFunc("POST /v1/web/challenge", s.challengeHandler)
 	mux.HandleFunc("POST /v1/web/login", s.webLoginHandler)
+	mux.HandleFunc("POST /v1/web/register", s.webRegisterHandler)
+	mux.HandleFunc("POST /v1/web/passlogin", s.webPassLoginHandler)
+	mux.HandleFunc("POST /v1/web/bindnonce", s.webBindNonceHandler)
+	mux.HandleFunc("POST /v1/web/bindkey", s.webBindKeyHandler)
 	mux.HandleFunc("GET /v1/web/logout", s.webLogoutHandler)
+	mux.HandleFunc("GET /v1/admin/users", s.adminUsersHandler)
+	mux.HandleFunc("POST /v1/admin/users", s.adminUsersHandler)
+	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.adminUserDeleteHandler)
 	mux.HandleFunc("GET /v1/console/status", s.consoleStatusHandler)
 	mux.HandleFunc("POST /v1/console/service", s.consoleServiceHandler)
 	mux.HandleFunc("GET /v1/console/files", s.consoleFilesHandler)
@@ -727,7 +751,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
-	s := &Server{cfg: cfg, db: db, chMap: map[string]webChallenge{}}
+	s := &Server{cfg: cfg, db: db, chMap: map[string]webChallenge{}, bindMap: map[string]bindChallenge{}}
 	s.jwt, err = s.jwtSecret()
 	if err != nil {
 		log.Fatalf("jwt secret: %v", err)

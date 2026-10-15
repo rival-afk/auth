@@ -25,14 +25,14 @@ type statService struct {
 }
 
 type statsResp struct {
-	Time     int64                   `json:"time"`
-	Domain   string                  `json:"domain"`
-	What     string                  `json:"what"`
-	Server   map[string]string       `json:"server"`
-	Load      map[string]interface{}  `json:"load"`
-	Services []statService           `json:"services"`
+	Time     int64                    `json:"time"`
+	Domain   string                   `json:"domain"`
+	What     string                   `json:"what"`
+	Server   map[string]string        `json:"server"`
+	Load     map[string]interface{}   `json:"load"`
+	Services []statService            `json:"services"`
 	NetPeers []map[string]interface{} `json:"net_peers"`
-	Keys     int                     `json:"issued_keys"`
+	Keys     int                      `json:"issued_keys"`
 }
 
 // hostWithoutPort strips :port from a Host header value.

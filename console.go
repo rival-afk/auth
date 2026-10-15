@@ -175,9 +175,9 @@ func (s *Server) webLoginHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "bad signature")
 		return
 	}
-	var keyID, role, hostsJSON, label, capsJSON string
-	err = s.db.QueryRow(`SELECT id, role, hosts, label, caps FROM keys WHERE pubkey = ?`, pub).
-		Scan(&keyID, &role, &hostsJSON, &label, &capsJSON)
+	var keyID, role, hostsJSON, label, capsJSON, userID string
+	err = s.db.QueryRow(`SELECT id, role, hosts, label, caps, user_id FROM keys WHERE pubkey = ?`, pub).
+		Scan(&keyID, &role, &hostsJSON, &label, &capsJSON, &userID)
 	if err != nil {
 		writeErr(w, 401, "unknown key")
 		return
@@ -189,8 +189,16 @@ func (s *Server) webLoginHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 403, "no console access for this key")
 		return
 	}
-	s.issueWebCookie(w, &Claims{KID: keyID, Role: role, Hosts: hosts, Caps: caps})
-	writeJSON(w, 200, map[string]interface{}{"ok": true, "label": label, "caps": caps})
+	un := ""
+	if userID != "" {
+		s.db.QueryRow(`SELECT username FROM users WHERE id = ?`, userID).Scan(&un)
+		if un == "" {
+			// user deleted; drop orphan key link
+			s.db.Exec(`UPDATE keys SET user_id = '' WHERE id = ?`, keyID)
+		}
+	}
+	s.issueWebCookie(w, &Claims{KID: keyID, UN: un, Role: role, Hosts: hosts, Caps: caps})
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "label": label, "username": un, "caps": caps})
 }
 
 func (s *Server) webLogoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -662,30 +670,155 @@ func (s *Server) loginPageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	page := `<!doctype html><html><head><meta charset=utf-8><title>rival — login</title><style>` + bwCSS + `</style></head><body>
 <pre>
-██████╗ ██╗   ██╗██╗███╗   ██╗
-██╔══██╗╚██╗ ██╔╝██║████╗  ██║
-██████╔╝ ╚████╔╝ ██║██╔██╗ ██║
-██╔══██╗  ╚██╔╝  ██║██║╚██╗██║
-██║  ██║   ██║   ██║██║ ╚████║
-╚═╝  ╚═╝   ╚═╝   ╚═╝╚═╝  ╚═══╝
+ __  __ ___ _   _ ____  _   _ ____ _____ ______   __
+|  \/  |_ _| \ | |  _ \| | | / ___|_   _|  _ \ \ / /
+| |\/| || ||  \| | | | | | | \___ \ | | | |_) \ V /
+| |  | || || |\  | |_| | |_| |___) || | |  _ < | |
+|_|  |_|___|_| \_|____/ \___/|____/ |_| |_| \_\|_|
 </pre>
 <div class=box style="max-width:560px">
-<p><b>console login</b></p>
-<p class=dim>sign a one-time nonce with your registered ed25519 key.
-your private key never leaves the browser (webcrypto).</p>
+<p><b>account</b></p>
+<input id=un placeholder="username" autocomplete="username" style="width:100%">
+<input id=pw type=password placeholder="password" autocomplete="current-password" style="width:100%">
+<div class=msg id=msg>&nbsp;</div>
+<button id=loginbtn>login</button>
+<button id=regbtn>register</button>
+<p class=dim>after login the browser generates an ed25519 key and stores it in
+your secret storage (indexeddb) for one-click quick login. private key never
+leaves the browser.</p>
+<div id=quickbox style="display:none">
+<button id=quickbtn>quick login</button>
+<span class=dim id=quickinfo></span>
+</div>
+</div>
+<div class=box style="max-width:560px;opacity:.65">
+<p><b>or .rsh key</b> <span class=dim>(secondary)</span></p>
 <p class=dim>select your private key file (~/.rsh/id):</p>
 <input type=file id=kf style="width:100%">
 <p class=dim>or paste public key, then sign with matching private key file above:</p>
 <textarea id=pub rows=3 style="width:100%"></textarea>
-<div class=msg id=msg>select your private key file (~/.rsh/id)</div>
-<button id=go disabled>login</button>
-<a class=btn href=/>back</a>
+<button id=kgo disabled>login with key</button>
 </div>
+<a class=btn href=/>back</a>
 <input type=hidden id=rd value="` + htmlEsc(rd) + `">
 <script>
-const msg=(t)=>document.getElementById('msg').textContent=t;
-let privKey=null;
+const RD=document.getElementById('rd').value;
+const msg=(t)=>document.getElementById('msg').textContent=t||' ';
 const b64=(buf)=>btoa(String.fromCharCode(...new Uint8Array(buf)));
+const SSH_PREFIX=new Uint8Array([0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20]);
+
+// ---- secret storage (indexeddb) ----
+const IDB_NAME='rival-web', IDB_STORE='keys';
+function idb(){
+  return new Promise((res,rej)=>{
+    const q=indexedDB.open(IDB_NAME,1);
+    q.onupgradeneeded=()=>{q.result.createObjectStore(IDB_STORE)};
+    q.onsuccess=()=>res(q.result);
+    q.onerror=()=>rej(q.error);
+  });
+}
+async function idbGet(k){
+  const db=await idb();
+  return new Promise((res,rej)=>{
+    const t=db.transaction(IDB_STORE,'readonly').objectStore(IDB_STORE).get(k);
+    t.onsuccess=()=>res(t.result);t.onerror=()=>rej(t.error);
+  });
+}
+async function idbPut(k,v){
+  const db=await idb();
+  return new Promise((res,rej)=>{
+    const t=db.transaction(IDB_STORE,'readwrite').objectStore(IDB_STORE).put(v,k);
+    t.onsuccess=()=>res();t.onerror=()=>rej(t.error);
+  });
+}
+async function idbDel(k){
+  const db=await idb();
+  return new Promise((res,rej)=>{
+    const t=db.transaction(IDB_STORE,'readwrite').objectStore(IDB_STORE).delete(k);
+    t.onsuccess=()=>res();t.onerror=()=>rej(t.error);
+  });
+}
+
+// ---- ed25519 helpers ----
+async function generateBrowserKey(){
+  const pair=await crypto.subtle.generateKey({name:'Ed25519'},true,['sign','verify']);
+  const pkcs8=new Uint8Array(await crypto.subtle.exportKey('pkcs8',pair.privateKey));
+  const spki=new Uint8Array(await crypto.subtle.exportKey('spki',pair.publicKey));
+  const rawPub=spki.slice(spki.length-32);
+  const blob=new Uint8Array(4+11+4+32);
+  const dv=new DataView(blob.buffer);
+  dv.setUint32(0,11);blob.set(new TextEncoder().encode('ssh-ed25519'),4);
+  dv.setUint32(15,32);blob.set(rawPub,19);
+  const pubSsh='ssh-ed25519 '+btoa(String.fromCharCode(...blob));
+  return {privPkcs8:pkcs8,pubSsh:pubSsh};
+}
+async function importStoredKey(rec){
+  return crypto.subtle.importKey('pkcs8',rec.privPkcs8,{name:'Ed25519'},false,['sign']);
+}
+async function quickLoginFlow(rec){
+  const privKey=await importStoredKey(rec);
+  const ch=await (await fetch('/v1/web/challenge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:rec.pubSsh})})).json();
+  if(ch.error){msg('challenge: '+ch.error);return}
+  const data=new TextEncoder().encode('rival-web-v1|'+ch.nonce);
+  const sig=await crypto.subtle.sign({name:'Ed25519'},privKey,data);
+  const res=await (await fetch('/v1/web/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:rec.pubSsh,nonce:ch.nonce,sig:b64(sig)})})).json();
+  if(res.error){msg('login: '+res.error);return}
+  location.href=RD;
+}
+async function bindBrowserKey(rec){
+  const bn=await (await fetch('/v1/web/bindnonce',{method:'POST'})).json();
+  if(bn.error)throw new Error(bn.error);
+  const privKey=await importStoredKey(rec);
+  const data=new TextEncoder().encode('rival-web-v1|'+bn.nonce);
+  const sig=await crypto.subtle.sign({name:'Ed25519'},privKey,data);
+  const bk=await (await fetch('/v1/web/bindkey',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:rec.pubSsh,nonce:bn.nonce,sig:b64(sig)})})).json();
+  if(bk.error)throw new Error(bk.error);
+  return bk;
+}
+
+// ---- password login / register ----
+async function passLogin(isReg){
+  const un=document.getElementById('un').value.trim().toLowerCase();
+  const pw=document.getElementById('pw').value;
+  if(!un||!pw){msg('username and password required');return}
+  const url=isReg?'/v1/web/register':'/v1/web/passlogin';
+  msg(isReg?'registering…':'logging in…');
+  const res=await (await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:un,password:pw})})).json();
+  if(res.error){msg(res.error);return}
+  try{
+    msg('generating browser key…');
+    let rec=await idbGet('default');
+    if(!rec||rec.user!==un){
+      rec=await generateBrowserKey();
+      rec.user=un;
+      await idbPut('default',rec);
+    }
+    const bk=await bindBrowserKey(rec);
+    msg('');
+  }catch(e){msg('password login ok, but key bind failed: '+e.message);return}
+  location.href=RD;
+}
+document.getElementById('loginbtn').onclick=()=>passLogin(false);
+document.getElementById('regbtn').onclick=()=>passLogin(true);
+document.getElementById('pw').addEventListener('keydown',(e)=>{if(e.key==='Enter')passLogin(false)});
+
+// quick login button if a key is already stored
+(async()=>{
+  try{
+    const rec=await idbGet('default');
+    if(rec&&rec.pubSsh){
+      document.getElementById('quickbox').style.display='block';
+      document.getElementById('quickinfo').textContent=rec.user?('as '+rec.user):'';
+      document.getElementById('quickbtn').onclick=async()=>{
+        msg('quick login…');
+        try{await quickLoginFlow(rec)}catch(e){msg('error: '+e.message)}
+      };
+    }
+  }catch(e){/* no indexeddb — password only */}
+})();
+
+// ---- .rsh key file (secondary) ----
+let privKey=null;
 function parseOpenSSH(buf){
   const u=new Uint8Array(buf);
   const magic=new TextEncoder().encode('openssh-key-v1\0');
@@ -693,14 +826,14 @@ function parseOpenSSH(buf){
   let off=magic.length;
   const dv=new DataView(u.buffer,u.byteOffset);
   const rdStr=()=>{const len=dv.getUint32(off);off+=4;const s=u.slice(off,off+len);off+=len;return s};
-  rdStr();rdStr();rdStr(); // cipher, kdf, kdf options
+  rdStr();rdStr();rdStr();
   const nkeys=dv.getUint32(off);off+=4;
   if(nkeys!==1)return null;
   const pubLen=dv.getUint32(off);off+=4+pubLen;
   const privLen=dv.getUint32(off);off+=4;
   const priv=u.slice(off,off+privLen);
   const pdv=new DataView(priv.buffer,priv.byteOffset);
-  let poff=8; // checkint x2
+  let poff=8;
   const rdPStr=()=>{const len=pdv.getUint32(poff);poff+=4;const s=priv.slice(poff,poff+len);poff+=len;return s};
   const ktype=rdPStr();
   if(new TextDecoder().decode(ktype)!=='ssh-ed25519')throw new Error('only ed25519 supported');
@@ -711,29 +844,25 @@ function parseOpenSSH(buf){
 }
 async function importKeyFile(buf,name){
   try{
-    const text=new TextDecoder().decode(buf.slice(0,200));
-    if(text.includes('BEGIN')&&text.includes('PRIVATE KEY')){msg('use openssh format (~/.rsh/id), not PEM');return}
-    if(!text.includes('openssh-key-v1')&&!buf.includes){/* binary check below */}
     const parsed=parseOpenSSH(buf);
     if(!parsed){msg('unrecognized key format — need openssh private key (~/.rsh/id)');return}
-    const prefix=new Uint8Array([0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20]);
-    const pkcs8=new Uint8Array(prefix.length+32);
-    pkcs8.set(prefix,0);pkcs8.set(parsed.seed,prefix.length);
+    const pkcs8=new Uint8Array(SSH_PREFIX.length+32);
+    pkcs8.set(SSH_PREFIX,0);pkcs8.set(parsed.seed,SSH_PREFIX.length);
     privKey=await crypto.subtle.importKey('pkcs8',pkcs8,{name:'Ed25519'},false,['sign']);
     const blob=new Uint8Array(4+11+4+32);
     const dv=new DataView(blob.buffer);
     dv.setUint32(0,11);blob.set(new TextEncoder().encode('ssh-ed25519'),4);
     dv.setUint32(15,32);blob.set(parsed.pubRaw,19);
     document.getElementById('pub').value='ssh-ed25519 '+btoa(String.fromCharCode(...blob))+' browser';
-    msg('key loaded: '+name+' — press login');
-    document.getElementById('go').disabled=false;
+    msg('key loaded: '+name+' — press login with key');
+    document.getElementById('kgo').disabled=false;
   }catch(e){msg('error: '+e.message)}
 }
 document.getElementById('kf').addEventListener('change',async(e)=>{
   const f=e.target.files[0];if(!f)return;
   importKeyFile(await f.arrayBuffer(),f.name);
 });
-document.getElementById('go').onclick=async()=>{
+document.getElementById('kgo').onclick=async()=>{
   try{
     const pub='ssh-ed25519 '+document.getElementById('pub').value.replace(/^ssh-ed25519\s+/,'').trim();
     const ch=await (await fetch('/v1/web/challenge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:pub})})).json();
@@ -742,7 +871,7 @@ document.getElementById('go').onclick=async()=>{
     const sig=await crypto.subtle.sign({name:'Ed25519'},privKey,data);
     const res=await (await fetch('/v1/web/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:pub,nonce:ch.nonce,sig:b64(sig)})})).json();
     if(res.error){msg('login: '+res.error);return}
-    location.href=document.getElementById('rd').value;
+    location.href=RD;
   }catch(e){msg('error: '+e.message)}
 };
 </script></body></html>`
@@ -755,8 +884,11 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	label := claims.KID
-	s.db.QueryRow(`SELECT label FROM keys WHERE id = ?`, claims.KID).Scan(&label)
+	label := claims.UN
+	if label == "" {
+		label = claims.KID
+		s.db.QueryRow(`SELECT label FROM keys WHERE id = ?`, claims.KID).Scan(&label)
+	}
 	consoleUI := hasCap(claims, "console")
 	sshUI := hasCap(claims, "ssh")
 
@@ -765,9 +897,11 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(bwCSS)
 	b.WriteString(`</style><link rel=stylesheet href=/console/xterm.min.css></head><body>
 <pre>
-█ ███ █ █   █ ███▀▀ █ █ █▀▀
-█  █  █ █   █ █▀▀  █   █▀▀
-█▄▄█ ▄█ █ █ █▄█▄▄ █▄█ █▄▄
+  ____ ___  _   _ ____   ___  _     _____
+ / ___/ _ \| \ | / ___| / _ \| |   | ____|
+| |  | | | |  \| \___ \| | | | |   |  _|
+| |__| |_| | |\  |___) | |_| | |___| |___|
+ \____\___/|_| \_|____/ \___/|_____|_____|
 </pre>
 <div class=box><b>mind console</b> — <b>`)
 	b.WriteString(htmlEsc(label))
