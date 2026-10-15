@@ -250,17 +250,48 @@ func (s *Server) consoleStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireWebCap(w, r, "console", false); !ok {
 		return
 	}
-	load, err := s.pcRootExec("cat /proc/loadavg; echo ---; awk '/MemTotal|MemAvailable/{print}' /proc/meminfo; echo ---; df -h / | tail -1; echo ---; rc-service mindustry status 2>&1 | head -2; echo ---; ss -uln | grep -q ':6567 ' && echo LISTEN_UDP || echo NO_UDP")
-	parts := strings.Split(string(load), "---")
+	raw, err := s.pcRootExec("cat /proc/loadavg; echo ---; awk '/MemTotal|MemAvailable/{print $2}' /proc/meminfo; echo ---; df -h / | tail -1 | awk '{print $5, $4}'; echo ---; rc-service mindustry status 2>&1 | head -1; echo ---; ss -uln | grep -q ':6567 ' && echo up || echo down")
+	parts := strings.Split(string(raw), "---")
 	get := func(i int) string {
 		if i < len(parts) {
 			return strings.TrimSpace(parts[i])
 		}
 		return ""
 	}
+	// parse loadavg -> "0.69 0.54 0.54"
+	loadStr := get(0)
+	if f := strings.Fields(loadStr); len(f) >= 3 {
+		loadStr = f[0] + " " + f[1] + " " + f[2]
+	}
+	// parse meminfo (kB) -> "1.6 / 31.2 GB"
+	memStr := get(1)
+	if f := strings.Fields(memStr); len(f) >= 2 {
+		if totalKB, err1 := strconv.ParseFloat(f[0], 64); err1 == nil {
+			if availKB, err2 := strconv.ParseFloat(f[1], 64); err2 == nil {
+				totalGB := totalKB / 1048576
+				usedGB := (totalKB - availKB) / 1048576
+				memStr = fmt.Sprintf("%.1f/%.1f GB", usedGB, totalGB)
+			}
+		}
+	}
+	// parse disk -> Use% Avail -> "44.8G free (3%)"
+	diskStr := get(2)
+	if f := strings.Fields(diskStr); len(f) >= 2 {
+		diskStr = f[1] + " free (" + f[0] + ")"
+	}
+	// service status -> just started/stopped
+	svc := get(3)
+	if strings.Contains(svc, "started") {
+		svc = "started"
+	} else if strings.Contains(svc, "stopped") {
+		svc = "stopped"
+	} else {
+		svc = "unknown"
+	}
+	udp := get(4)
 	writeJSON(w, 200, map[string]interface{}{
-		"load": get(0), "mem": get(1), "disk": get(2),
-		"service": get(3), "udp": get(4), "ok": err == nil,
+		"load": loadStr, "mem": memStr, "disk": diskStr,
+		"service": svc, "udp": udp, "ok": err == nil,
 	})
 }
 
@@ -646,6 +677,8 @@ const bwCSS = `@font-face{font-family:Inter;font-style:normal;font-weight:400;fo
 @font-face{font-family:Inter;font-style:normal;font-weight:500;font-display:swap;src:url(/console/inter-500.ttf) format('truetype')}
 @font-face{font-family:Inter;font-style:normal;font-weight:700;font-display:swap;src:url(/console/inter-700.ttf) format('truetype')}
 @font-face{font-family:Gasoek;font-style:normal;font-weight:400;font-display:swap;src:url(/console/gasoek.ttf) format('truetype')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(/console/jbmono-400.ttf) format('truetype')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:500;font-display:swap;src:url(/console/jbmono-500.ttf) format('truetype')}
 body{margin:0;padding:12px 16px;background:#000;color:#e8e8e8;font:14px/1.5 Inter,ui-monospace,Menlo,Consolas,monospace;touch-action:manipulation;-webkit-text-size-adjust:100%}
 *{box-sizing:border-box}
 a{color:#fff}a:hover{background:#fff;color:#000}
@@ -664,7 +697,8 @@ input[type=file]::-webkit-file-upload-button{background:#000;color:#fff;border:1
 input[type=file]::-webkit-file-upload-button:hover{background:#fff;color:#000}
 table{border-collapse:collapse;width:100%;table-layout:fixed}td,th{border:1px solid #444;padding:4px 10px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0}
 td:nth-child(3),th:nth-child(3){white-space:normal;word-break:break-all}
-.dim{color:#888}
+.dim{color:#888;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px}
+.stat{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:inline-block;vertical-align:middle}
 .msg{border:1px solid #555;padding:6px 10px;margin:8px 0;min-height:1.2em;overflow-wrap:break-word;word-break:break-word}
 .msg:empty:before{content:attr(data-ph);color:#555}
 #term,#sterm{border:1px solid #555;padding:4px;height:420px;margin:10px 0;overflow:hidden}
@@ -960,7 +994,7 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 <button onclick=svc('start')>start</button>
 <button onclick=svc('stop')>stop</button>
 <button onclick=svc('restart')>restart</button>
-<span class=dim style="float:right" id=stat>…</span>
+<div class=stat id=stat style="margin-top:6px">…</div>
 </div>
 <div class=box>
 <b>terminal</b> — mind@pc &middot; home=/home/mind (server dir, jailed)
@@ -1021,8 +1055,8 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 async function refresh(){
   const s=await j('/v1/console/status');
   if(s.error){document.getElementById('stat').textContent='err: '+s.error;return}
-  document.getElementById('stat').textContent='load '+(s.load||'?')+' | '+(s.mem||'')+' | '+(s.disk||'');
-  document.getElementById('svc').textContent=((s.service||'').includes('started')?'started':(s.service||'').includes('stopped')?'stopped':'?')+(s.udp==='LISTEN_UDP'?' udp:6567':' udp:down');
+  document.getElementById('stat').textContent='load '+(s.load||'?')+' · '+(s.mem||'')+' · '+(s.disk||'')+' · udp:'+(s.udp==='up'?'on':'off');
+  document.getElementById('svc').textContent=(s.service||'?');
 }
 async function svc(a){msg('service '+a+'…');const r=await j('/v1/console/service',{action:a});msg(r.ok?('service '+a+' ok'):('service: '+(r.error||'fail')));setTimeout(refresh,1500)}
 async function ls(kind,tab){

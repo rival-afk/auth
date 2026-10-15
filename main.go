@@ -730,6 +730,8 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /console/inter-400.ttf", s.consoleStaticHandler)
 	mux.HandleFunc("GET /console/inter-500.ttf", s.consoleStaticHandler)
 	mux.HandleFunc("GET /console/inter-700.ttf", s.consoleStaticHandler)
+	mux.HandleFunc("GET /console/jbmono-400.ttf", s.consoleStaticHandler)
+	mux.HandleFunc("GET /console/jbmono-500.ttf", s.consoleStaticHandler)
 	mux.HandleFunc("POST /v1/web/challenge", s.challengeHandler)
 	mux.HandleFunc("POST /v1/web/login", s.webLoginHandler)
 	mux.HandleFunc("POST /v1/web/register", s.webRegisterHandler)
