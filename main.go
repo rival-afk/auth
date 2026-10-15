@@ -718,6 +718,7 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /v1/net/peers", s.netPeersHandler)
 	mux.HandleFunc("GET /v1/net/peer/{label}", s.netPeerHandler)
 	// web console (mind.rival-afk.com/console, login on auth.rival-afk.com)
+	mux.HandleFunc("GET /error", s.errorPageHandler)
 	mux.HandleFunc("GET /login", s.loginPageHandler)
 	mux.HandleFunc("GET /console", s.consolePageHandler)
 	mux.HandleFunc("GET /console/ws", s.consoleWSHandler)

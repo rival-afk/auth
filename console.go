@@ -786,7 +786,16 @@ async function importStoredKey(rec){
 async function quickLoginFlow(rec){
   const privKey=await importStoredKey(rec);
   const ch=await (await fetch('/v1/web/challenge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:rec.pubSsh})})).json();
-  if(ch.error){msg('challenge: '+ch.error);return}
+  if(ch.error){
+    // stored key not on server anymore — drop it, ask for password login
+    if(ch.error==='unknown key'){
+      await idbDel('default');
+      document.getElementById('quickbox').style.display='none';
+      msg('stored key is not registered — login with password once to re-bind');
+      return;
+    }
+    msg('challenge: '+ch.error);return;
+  }
   const data=new TextEncoder().encode('rival-web-v1|'+ch.nonce);
   const sig=await crypto.subtle.sign({name:'Ed25519'},privKey,data);
   const res=await (await fetch('/v1/web/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:rec.pubSsh,nonce:ch.nonce,sig:b64(sig)})})).json();
@@ -1087,4 +1096,39 @@ func (s *Server) consoleStaticHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
 	}
 	w.Write(data)
+}
+
+// ---- error page ----
+
+func (s *Server) errorPageHandler(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		code = "unknown"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(200)
+	page := `<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>rival — error</title><style>` + bwCSS + `
+.center{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:80vh;text-align:center}
+.code{font-size:64px;font-weight:bold;margin:0}
+.msg-big{font-size:18px;margin-top:12px}
+.sub{margin-top:20px}
+</style></head><body oncontextmenu="return false">
+<div class=center>
+<pre style="font-size:11px;line-height:1.1">
+ __  __ ___ _   _ ____  _   _ ____ _____ ______   __
+|  \/  |_ _| \ | |  _ \| | | / ___|_   _|  _ \ \ / /
+| |\/| || ||  \| | | | | | | \___ \ | | | |_) \ V /
+| |  | || || |\  | |_| | |_| |___) || | |  _ < | |
+|_|  |_|___|_| \_|____/ \___/|____/ |_| |_| \_\|_|
+</pre>
+<p class=code>` + htmlEsc(code) + `</p>
+<p class=msg-big>Ой... что-то сломалось</p>
+<p class=sub><a class=btn href=/>на главную</a></p>
+</div>
+<script>
+document.addEventListener('wheel',(e)=>{if(e.ctrlKey)e.preventDefault()},{passive:false});
+document.addEventListener('touchstart',(e)=>{if(e.touches.length>1)e.preventDefault()},{passive:false});
+document.addEventListener('gesturestart',(e)=>e.preventDefault());
+</script></body></html>`
+	w.Write([]byte(page))
 }
