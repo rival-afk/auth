@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -54,12 +55,16 @@ type Server struct {
 	cfg *Config
 	db  *sql.DB
 	jwt []byte
+
+	chMu  sync.Mutex
+	chMap map[string]webChallenge
 }
 
 type Claims struct {
 	KID   string   `json:"kid"`
 	Role  string   `json:"role"`
 	Hosts []string `json:"hosts"`
+	Caps  []string `json:"caps,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -110,6 +115,7 @@ CREATE TABLE IF NOT EXISTS keys (
   role TEXT NOT NULL,
   hosts TEXT NOT NULL,
   label TEXT NOT NULL DEFAULT '',
+  caps TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS issued (
@@ -125,7 +131,32 @@ CREATE TABLE IF NOT EXISTS net_peers (
   meta TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	// upgrade pre-caps databases
+	var cols []string
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('keys')`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var n string
+			rows.Scan(&n)
+			cols = append(cols, n)
+		}
+	}
+	hasCaps := false
+	for _, c := range cols {
+		if c == "caps" {
+			hasCaps = true
+		}
+	}
+	if !hasCaps {
+		s.db.Exec(`ALTER TABLE keys ADD COLUMN caps TEXT NOT NULL DEFAULT '[]'`)
+		s.db.Exec(`UPDATE keys SET caps='["console","ssh"]' WHERE label='bootstrap-admin'`)
+		s.db.Exec(`UPDATE keys SET caps='["console"]' WHERE role='admin' AND caps='[]'`)
+	}
+	return nil
 }
 
 func (s *Server) bootstrap() error {
@@ -143,8 +174,8 @@ func (s *Server) bootstrap() error {
 	}
 	hj, _ := json.Marshal(hosts)
 	id := randID()
-	_, err := s.db.Exec(`INSERT INTO keys (id, pubkey, role, hosts, label, created_at) VALUES (?,?,?,?,?,?)`,
-		id, pub, "admin", string(hj), "bootstrap-admin", time.Now().Unix())
+	_, err := s.db.Exec(`INSERT INTO keys (id, pubkey, role, hosts, label, caps, created_at) VALUES (?,?,?,?,?,?,?)`,
+		id, pub, "admin", string(hj), "bootstrap-admin", `["console","ssh"]`, time.Now().Unix())
 	if err != nil {
 		return err
 	}
@@ -252,8 +283,8 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if claims.Role != "admin" {
-		writeErr(w, 403, "ssh requires admin role")
+	if !hasCap(claims, "ssh") {
+		writeErr(w, 403, "ssh capability required")
 		return
 	}
 	var req struct {
@@ -340,7 +371,7 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := s.db.Query(`SELECT id, pubkey, role, hosts, label, created_at FROM keys ORDER BY created_at`)
+		rows, err := s.db.Query(`SELECT id, pubkey, role, hosts, label, caps, created_at FROM keys ORDER BY created_at`)
 		if err != nil {
 			writeErr(w, 500, "db error")
 			return
@@ -348,14 +379,15 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var id, pub, role, hostsJSON, label string
+			var id, pub, role, hostsJSON, label, capsJSON string
 			var ca int64
-			rows.Scan(&id, &pub, &role, &hostsJSON, &label, &ca)
-			var hosts []string
+			rows.Scan(&id, &pub, &role, &hostsJSON, &label, &capsJSON, &ca)
+			var hosts, caps []string
 			json.Unmarshal([]byte(hostsJSON), &hosts)
+			json.Unmarshal([]byte(capsJSON), &caps)
 			out = append(out, map[string]interface{}{
 				"id": id, "pubkey": pub, "role": role, "hosts": hosts,
-				"label": label, "created_at": ca,
+				"label": label, "caps": caps, "created_at": ca,
 			})
 		}
 		writeJSON(w, 200, out)
@@ -365,6 +397,7 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 			Role   string   `json:"role"`
 			Hosts  []string `json:"hosts"`
 			Label  string   `json:"label"`
+			Caps   []string `json:"caps"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, 400, "bad request")
@@ -373,6 +406,15 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 		if req.Role != "user" && req.Role != "admin" {
 			writeErr(w, 400, "role must be user or admin")
 			return
+		}
+		for _, c := range req.Caps {
+			if c != "console" && c != "ssh" {
+				writeErr(w, 400, "caps must be console and/or ssh")
+				return
+			}
+		}
+		if len(req.Caps) == 0 {
+			req.Caps = []string{"console"}
 		}
 		if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(req.Pubkey))); err != nil {
 			writeErr(w, 400, "bad pubkey")
@@ -391,14 +433,15 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		hj, _ := json.Marshal(req.Hosts)
+		cj, _ := json.Marshal(req.Caps)
 		id := randID()
-		_, err := s.db.Exec(`INSERT INTO keys (id, pubkey, role, hosts, label, created_at) VALUES (?,?,?,?,?,?)`,
-			id, strings.TrimSpace(req.Pubkey), req.Role, string(hj), req.Label, time.Now().Unix())
+		_, err := s.db.Exec(`INSERT INTO keys (id, pubkey, role, hosts, label, caps, created_at) VALUES (?,?,?,?,?,?,?)`,
+			id, strings.TrimSpace(req.Pubkey), req.Role, string(hj), req.Label, string(cj), time.Now().Unix())
 		if err != nil {
 			writeErr(w, 409, "key already exists or db error")
 			return
 		}
-		writeJSON(w, 200, map[string]interface{}{"id": id})
+		writeJSON(w, 200, map[string]interface{}{"id": id, "caps": req.Caps})
 	default:
 		writeErr(w, 405, "method not allowed")
 	}
@@ -649,6 +692,22 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("POST /v1/net/announce", s.netAnnounceHandler)
 	mux.HandleFunc("GET /v1/net/peers", s.netPeersHandler)
 	mux.HandleFunc("GET /v1/net/peer/{label}", s.netPeerHandler)
+	// web console (mind.rival-afk.com/console, login on auth.rival-afk.com)
+	mux.HandleFunc("GET /login", s.loginPageHandler)
+	mux.HandleFunc("GET /console", s.consolePageHandler)
+	mux.HandleFunc("GET /console/ws", s.consoleWSHandler)
+	mux.HandleFunc("GET /console/ssh", s.consoleSSHHandler)
+	mux.HandleFunc("GET /console/xterm.min.css", s.consoleStaticHandler)
+	mux.HandleFunc("GET /console/xterm.min.js", s.consoleStaticHandler)
+	mux.HandleFunc("GET /console/fit.min.js", s.consoleStaticHandler)
+	mux.HandleFunc("POST /v1/web/challenge", s.challengeHandler)
+	mux.HandleFunc("POST /v1/web/login", s.webLoginHandler)
+	mux.HandleFunc("GET /v1/web/logout", s.webLogoutHandler)
+	mux.HandleFunc("GET /v1/console/status", s.consoleStatusHandler)
+	mux.HandleFunc("POST /v1/console/service", s.consoleServiceHandler)
+	mux.HandleFunc("GET /v1/console/files", s.consoleFilesHandler)
+	mux.HandleFunc("POST /v1/console/fetch", s.consoleFetchHandler)
+	mux.HandleFunc("DELETE /v1/console/file", s.consoleFileDeleteHandler)
 	return mux
 }
 
@@ -668,7 +727,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
-	s := &Server{cfg: cfg, db: db}
+	s := &Server{cfg: cfg, db: db, chMap: map[string]webChallenge{}}
 	s.jwt, err = s.jwtSecret()
 	if err != nil {
 		log.Fatalf("jwt secret: %v", err)
