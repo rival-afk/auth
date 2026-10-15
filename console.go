@@ -648,10 +648,12 @@ button,.btn{background:#000;color:#fff;border:1px solid #fff;padding:6px 16px;fo
 button:hover,.btn:hover{background:#fff;color:#000}
 button:disabled{border-color:#555;color:#555;cursor:default}
 input,textarea{background:#000;color:#fff;border:1px solid #555;padding:6px 8px;font:13px ui-monospace,monospace}
+input::placeholder,textarea::placeholder{color:#555}
 input:focus,textarea:focus{outline:none;border-color:#fff}
 table{border-collapse:collapse;width:100%%}td,th{border:1px solid #444;padding:4px 10px;text-align:left}
 .dim{color:#888}
 .msg{border:1px solid #555;padding:6px 10px;margin:8px 0;min-height:1.2em}
+.msg:empty:before{content:attr(data-ph);color:#555}
 #term,#sterm{border:1px solid #555;padding:4px;height:420px;margin:10px 0}`
 
 func htmlEsc(s string) string {
@@ -680,7 +682,7 @@ func (s *Server) loginPageHandler(w http.ResponseWriter, r *http.Request) {
 <p><b>account</b></p>
 <input id=un placeholder="username" autocomplete="username" style="width:100%">
 <input id=pw type=password placeholder="password" autocomplete="current-password" style="width:100%">
-<div class=msg id=msg>&nbsp;</div>
+<div class=msg id=msg data-ph="…"></div>
 <button id=loginbtn>login</button>
 <button id=regbtn>register</button>
 <p class=dim>after login the browser generates an ed25519 key and stores it in
@@ -703,7 +705,7 @@ leaves the browser.</p>
 <input type=hidden id=rd value="` + htmlEsc(rd) + `">
 <script>
 const RD=document.getElementById('rd').value;
-const msg=(t)=>document.getElementById('msg').textContent=t||' ';
+const msg=(t)=>document.getElementById('msg').textContent=t||'';
 const b64=(buf)=>btoa(String.fromCharCode(...new Uint8Array(buf)));
 const SSH_PREFIX=new Uint8Array([0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20]);
 
@@ -948,7 +950,7 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 <div id=sterm></div>
 </div>`)
 	}
-	b.WriteString(`<div class=msg id=msg></div>
+	b.WriteString(`<div class=msg id=msg data-ph="…"></div>
 <script src=/console/xterm.min.js></script>
 <script src=/console/fit.min.js></script>
 <script>

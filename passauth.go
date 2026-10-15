@@ -51,7 +51,7 @@ func (s *Server) lookupUserByUsername(username string) (id, hash, role, capsJSON
 	return id, hash, role, capsJSON, err == nil
 }
 
-// POST /v1/web/register — open only while no users exist; first user = admin.
+// POST /v1/web/register — open to everyone; always creates a regular user with console cap.
 func (s *Server) webRegisterHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
@@ -70,28 +70,20 @@ func (s *Server) webRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "password: min 8 characters")
 		return
 	}
-	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
-	role, caps := "user", `["console"]`
-	if n == 0 {
-		role, caps = "admin", `["console","ssh"]`
-	} else {
-		writeErr(w, 403, "registration closed — ask an admin to create your account")
-		return
-	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		writeErr(w, 500, "hash error")
 		return
 	}
 	id := randID()
+	// every self-registered account is a regular user with console access only
 	if _, err := s.db.Exec(`INSERT INTO users (id, username, pass_hash, role, caps, created_at) VALUES (?,?,?,?,?,?)`,
-		id, username, string(hash), role, caps, time.Now().Unix()); err != nil {
+		id, username, string(hash), "user", `["console"]`, time.Now().Unix()); err != nil {
 		writeErr(w, 409, "username taken")
 		return
 	}
-	s.issueWebCookie(w, s.userClaims(id, username, role, caps))
-	writeJSON(w, 200, map[string]interface{}{"ok": true, "username": username, "role": role, "caps": jsonCaps(caps)})
+	s.issueWebCookie(w, s.userClaims(id, username, "user", `["console"]`))
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "username": username, "role": "user", "caps": []string{"console"}})
 }
 
 // POST /v1/web/passlogin — username+password.
@@ -211,6 +203,25 @@ func (s *Server) webBindKeyHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{"ok": true, "id": id})
 }
 
+// canGrantCaps: admin can only grant caps they themselves have.
+func canGrantCaps(granter *Claims, caps []string) bool {
+	for _, c := range caps {
+		if !containsStr(granter.Caps, c) {
+			return false
+		}
+	}
+	return true
+}
+
+func validCaps(caps []string) bool {
+	for _, c := range caps {
+		if c != "console" && c != "ssh" {
+			return false
+		}
+	}
+	return true
+}
+
 // GET/POST /v1/admin/users — bearer-auth admin management of password accounts.
 func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	claims, ok := s.requireAuth(w, r)
@@ -264,14 +275,17 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 		if req.Role != "user" && req.Role != "admin" {
 			req.Role = "user"
 		}
-		for _, c := range req.Caps {
-			if c != "console" && c != "ssh" {
-				writeErr(w, 400, "caps must be console and/or ssh")
-				return
-			}
-		}
 		if len(req.Caps) == 0 {
 			req.Caps = []string{"console"}
+		}
+		if !validCaps(req.Caps) {
+			writeErr(w, 400, "caps must be console and/or ssh")
+			return
+		}
+		// hierarchy: cannot grant caps you don't have yourself
+		if !canGrantCaps(claims, req.Caps) {
+			writeErr(w, 403, "cannot grant caps you don't have")
+			return
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
@@ -289,6 +303,74 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, 405, "method not allowed")
 	}
+}
+
+// PATCH /v1/admin/users/{id} — change role and/or caps of an existing user.
+func (s *Server) adminUserUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	claims, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if claims.Role != "admin" {
+		writeErr(w, 403, "admin only")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeErr(w, 400, "missing id")
+		return
+	}
+	var req struct {
+		Role string   `json:"role"`
+		Caps []string `json:"caps"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad request")
+		return
+	}
+	var curRole, curCapsJSON string
+	if err := s.db.QueryRow(`SELECT role, caps FROM users WHERE id = ?`, id).Scan(&curRole, &curCapsJSON); err != nil {
+		writeErr(w, 404, "not found")
+		return
+	}
+	newRole := req.Role
+	if newRole == "" {
+		newRole = curRole
+	}
+	if newRole != "user" && newRole != "admin" {
+		writeErr(w, 400, "role must be user or admin")
+		return
+	}
+	newCaps := req.Caps
+	if newCaps == nil {
+		json.Unmarshal([]byte(curCapsJSON), &newCaps)
+	}
+	if !validCaps(newCaps) {
+		writeErr(w, 400, "caps must be console and/or ssh")
+		return
+	}
+	// hierarchy: admin can only grant what they have (equal or lower)
+	if !canGrantCaps(claims, newCaps) {
+		writeErr(w, 403, "cannot grant caps you don't have")
+		return
+	}
+	// protect last admin from demotion
+	if curRole == "admin" && newRole != "admin" {
+		var admins int
+		s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&admins)
+		if admins <= 1 {
+			writeErr(w, 400, "cannot demote the last admin")
+			return
+		}
+	}
+	cj, _ := json.Marshal(newCaps)
+	if _, err := s.db.Exec(`UPDATE users SET role = ?, caps = ? WHERE id = ?`, newRole, string(cj), id); err != nil {
+		writeErr(w, 500, "db error")
+		return
+	}
+	// keep bound browser keys in sync with user's caps/role
+	s.db.Exec(`UPDATE keys SET caps = ?, role = ? WHERE user_id = ?`, string(cj), newRole, id)
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "id": id, "role": newRole, "caps": newCaps})
 }
 
 // DELETE /v1/admin/users/{id}
@@ -330,10 +412,4 @@ func (s *Server) adminUserDeleteHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	s.db.Exec(`DELETE FROM keys WHERE user_id = ?`, id)
 	writeJSON(w, 200, map[string]interface{}{"deleted": id})
-}
-
-func jsonCaps(capsJSON string) []string {
-	var caps []string
-	json.Unmarshal([]byte(capsJSON), &caps)
-	return caps
 }

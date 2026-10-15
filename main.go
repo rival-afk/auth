@@ -250,9 +250,9 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad pubkey")
 		return
 	}
-	var keyID, role, hostsJSON, label string
-	err = s.db.QueryRow(`SELECT id, role, hosts, label FROM keys WHERE pubkey = ?`, pub).
-		Scan(&keyID, &role, &hostsJSON, &label)
+	var keyID, role, hostsJSON, label, capsJSON string
+	err = s.db.QueryRow(`SELECT id, role, hosts, label, caps FROM keys WHERE pubkey = ?`, pub).
+		Scan(&keyID, &role, &hostsJSON, &label, &capsJSON)
 	if err != nil {
 		writeErr(w, 401, "unknown key")
 		return
@@ -267,13 +267,15 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "bad signature")
 		return
 	}
-	var hosts []string
+	var hosts, caps []string
 	json.Unmarshal([]byte(hostsJSON), &hosts)
+	json.Unmarshal([]byte(capsJSON), &caps)
 	exp := time.Now().Add(time.Hour)
 	claims := Claims{
 		KID:   keyID,
 		Role:  role,
 		Hosts: hosts,
+		Caps:  caps,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now().Add(-5 * time.Second)),
@@ -291,6 +293,7 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 		"token": tok,
 		"role":  role,
 		"hosts": hosts,
+		"caps":  caps,
 		"exp":   exp.Unix(),
 	})
 }
@@ -432,6 +435,11 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(req.Caps) == 0 {
 			req.Caps = []string{"console"}
+		}
+		// hierarchy: cannot grant caps you don't have yourself
+		if !canGrantCaps(claims, req.Caps) {
+			writeErr(w, 403, "cannot grant caps you don't have")
+			return
 		}
 		if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(req.Pubkey))); err != nil {
 			writeErr(w, 400, "bad pubkey")
@@ -726,6 +734,7 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /v1/web/logout", s.webLogoutHandler)
 	mux.HandleFunc("GET /v1/admin/users", s.adminUsersHandler)
 	mux.HandleFunc("POST /v1/admin/users", s.adminUsersHandler)
+	mux.HandleFunc("PATCH /v1/admin/users/{id}", s.adminUserUpdateHandler)
 	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.adminUserDeleteHandler)
 	mux.HandleFunc("GET /v1/console/status", s.consoleStatusHandler)
 	mux.HandleFunc("POST /v1/console/service", s.consoleServiceHandler)
