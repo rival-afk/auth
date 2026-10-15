@@ -173,6 +173,9 @@ CREATE TABLE IF NOT EXISTS users (
 	if !hasUserID {
 		s.db.Exec(`ALTER TABLE keys ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`)
 	}
+	// role model: the ssh cap implies the owner tier (root access to hosts)
+	s.db.Exec(`UPDATE keys SET role='owner' WHERE role='admin' AND caps LIKE '%"ssh"%'`)
+	s.db.Exec(`UPDATE users SET role='owner' WHERE role='admin' AND caps LIKE '%"ssh"%'`)
 	return nil
 }
 
@@ -192,7 +195,7 @@ func (s *Server) bootstrap() error {
 	hj, _ := json.Marshal(hosts)
 	id := randID()
 	_, err := s.db.Exec(`INSERT INTO keys (id, pubkey, role, hosts, label, caps, created_at) VALUES (?,?,?,?,?,?,?)`,
-		id, pub, "admin", string(hj), "bootstrap-admin", `["console","ssh"]`, time.Now().Unix())
+		id, pub, "owner", string(hj), "bootstrap-admin", `["console","ssh"]`, time.Now().Unix())
 	if err != nil {
 		return err
 	}
@@ -385,7 +388,7 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if claims.Role != "admin" {
+	if !isAdminRole(claims.Role) {
 		writeErr(w, 403, "admin only")
 		return
 	}
@@ -423,18 +426,24 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "bad request")
 			return
 		}
-		if req.Role != "user" && req.Role != "admin" {
-			writeErr(w, 400, "role must be user or admin")
+		if !validRole(req.Role) {
+			writeErr(w, 400, "role must be user, admin or owner")
 			return
 		}
-		for _, c := range req.Caps {
-			if c != "console" && c != "ssh" {
-				writeErr(w, 400, "caps must be console and/or ssh")
-				return
-			}
+		if !canAssignRole(claims, req.Role) {
+			writeErr(w, 403, "only owners can assign the owner role")
+			return
 		}
-		if len(req.Caps) == 0 {
+		if !validCaps(req.Caps) {
+			writeErr(w, 400, "caps must be console and/or ssh")
+			return
+		}
+		if len(req.Caps) == 0 && isAdminRole(req.Role) {
 			req.Caps = []string{"console"}
+		}
+		if msg := capsRoleError(req.Role, req.Caps); msg != "" {
+			writeErr(w, 400, msg)
+			return
 		}
 		// hierarchy: cannot grant caps you don't have yourself
 		if !canGrantCaps(claims, req.Caps) {
@@ -477,7 +486,7 @@ func (s *Server) adminKeyDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if claims.Role != "admin" {
+	if !isAdminRole(claims.Role) {
 		writeErr(w, 403, "admin only")
 		return
 	}

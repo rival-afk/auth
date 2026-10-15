@@ -225,18 +225,33 @@ func validCaps(caps []string) bool {
 	return true
 }
 
-// capsAllowedForRole enforces the privilege model: the web console is admin-only.
-// Regular users may hold "ssh" (host key issuance) but never "console".
-func capsAllowedForRole(role string, caps []string) bool {
-	if role == "admin" {
-		return true
-	}
-	for _, c := range caps {
-		if c == "console" {
-			return false
-		}
+// ---- role model: user < admin < owner ----
+//
+//	console -> admin or owner
+//	ssh     -> owner only (this cap hands out root access to hosts)
+func isAdminRole(role string) bool { return role == "admin" || role == "owner" }
+func isOwnerRole(role string) bool { return role == "owner" }
+func validRole(role string) bool   { return role == "user" || role == "admin" || role == "owner" }
+
+// canAssignRole: only owners may mint other owners.
+func canAssignRole(actor *Claims, role string) bool {
+	if role == "owner" {
+		return isOwnerRole(actor.Role)
 	}
 	return true
+}
+
+// capsRoleError returns a human message if any cap is not allowed for the role.
+func capsRoleError(role string, caps []string) string {
+	for _, c := range caps {
+		if c == "console" && !isAdminRole(role) {
+			return "console is admin-only"
+		}
+		if c == "ssh" && !isOwnerRole(role) {
+			return "ssh is owner-only (root access)"
+		}
+	}
+	return ""
 }
 
 // GET/POST /v1/admin/users — bearer-auth admin management of password accounts.
@@ -245,7 +260,7 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if claims.Role != "admin" {
+	if !isAdminRole(claims.Role) {
 		writeErr(w, 403, "admin only")
 		return
 	}
@@ -289,8 +304,12 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "password: min 8 characters")
 			return
 		}
-		if req.Role != "user" && req.Role != "admin" {
+		if !validRole(req.Role) {
 			req.Role = "user"
+		}
+		if !canAssignRole(claims, req.Role) {
+			writeErr(w, 403, "only owners can assign the owner role")
+			return
 		}
 		if req.Caps == nil {
 			req.Caps = []string{}
@@ -299,8 +318,8 @@ func (s *Server) adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "caps must be console and/or ssh")
 			return
 		}
-		if !capsAllowedForRole(req.Role, req.Caps) {
-			writeErr(w, 400, "console is admin-only")
+		if msg := capsRoleError(req.Role, req.Caps); msg != "" {
+			writeErr(w, 400, msg)
 			return
 		}
 		// hierarchy: cannot grant caps you don't have yourself
@@ -332,7 +351,7 @@ func (s *Server) adminUserUpdateHandler(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if claims.Role != "admin" {
+	if !isAdminRole(claims.Role) {
 		writeErr(w, 403, "admin only")
 		return
 	}
@@ -358,8 +377,12 @@ func (s *Server) adminUserUpdateHandler(w http.ResponseWriter, r *http.Request) 
 	if newRole == "" {
 		newRole = curRole
 	}
-	if newRole != "user" && newRole != "admin" {
-		writeErr(w, 400, "role must be user or admin")
+	if !validRole(newRole) {
+		writeErr(w, 400, "role must be user, admin or owner")
+		return
+	}
+	if !canAssignRole(claims, newRole) {
+		writeErr(w, 403, "only owners can assign the owner role")
 		return
 	}
 	newCaps := req.Caps
@@ -370,8 +393,8 @@ func (s *Server) adminUserUpdateHandler(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 400, "caps must be console and/or ssh")
 		return
 	}
-	if !capsAllowedForRole(newRole, newCaps) {
-		writeErr(w, 400, "console is admin-only")
+	if msg := capsRoleError(newRole, newCaps); msg != "" {
+		writeErr(w, 400, msg)
 		return
 	}
 	// hierarchy: admin can only grant what they have (equal or lower)
@@ -379,12 +402,20 @@ func (s *Server) adminUserUpdateHandler(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 403, "cannot grant caps you don't have")
 		return
 	}
-	// protect last admin from demotion
-	if curRole == "admin" && newRole != "admin" {
-		var admins int
-		s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&admins)
-		if admins <= 1 {
+	// protect the last admin/owner, and the last owner (ssh tier)
+	if isAdminRole(curRole) && !isAdminRole(newRole) {
+		var n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role IN ('admin','owner')`).Scan(&n)
+		if n <= 1 {
 			writeErr(w, 400, "cannot demote the last admin")
+			return
+		}
+	}
+	if isOwnerRole(curRole) && !isOwnerRole(newRole) {
+		var n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'owner'`).Scan(&n)
+		if n <= 1 {
+			writeErr(w, 400, "cannot demote the last owner")
 			return
 		}
 	}
@@ -404,7 +435,7 @@ func (s *Server) adminUserDeleteHandler(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if claims.Role != "admin" {
+	if !isAdminRole(claims.Role) {
 		writeErr(w, 403, "admin only")
 		return
 	}
@@ -413,17 +444,27 @@ func (s *Server) adminUserDeleteHandler(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 400, "missing id")
 		return
 	}
-	// never delete the last admin
-	var admins int
-	s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&admins)
 	var role string
 	if err := s.db.QueryRow(`SELECT role FROM users WHERE id = ?`, id).Scan(&role); err != nil {
 		writeErr(w, 404, "not found")
 		return
 	}
-	if role == "admin" && admins <= 1 {
-		writeErr(w, 400, "cannot delete the last admin")
-		return
+	// never delete the last admin/owner, nor the last owner (ssh tier)
+	if isAdminRole(role) {
+		var n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role IN ('admin','owner')`).Scan(&n)
+		if n <= 1 {
+			writeErr(w, 400, "cannot delete the last admin")
+			return
+		}
+	}
+	if isOwnerRole(role) {
+		var n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'owner'`).Scan(&n)
+		if n <= 1 {
+			writeErr(w, 400, "cannot delete the last owner")
+			return
+		}
 	}
 	res, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
