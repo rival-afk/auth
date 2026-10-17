@@ -326,7 +326,7 @@ const authStatusCSS = `
 @font-face{font-family:Inter;font-style:normal;font-weight:700;font-display:swap;src:url(/console/inter-700.ttf) format('truetype')}
 @font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(/console/jbmono-400.ttf) format('truetype')}
 *{box-sizing:border-box}
-:root{--ease:cubic-bezier(.4,0,.2,1);--ease-em:cubic-bezier(.05,.7,.1,1);--dur:250ms;--dur-l:420ms;--primary:#ffb77c;--on-primary:#2b1400;--surface:#16181d;--surface-c:#1d2024;--outline:#44464f;--on-surface:#e2e2e9;--on-surface-variant:#c6c6d0;--muted:#8f9099}
+:root{--ease:cubic-bezier(.4,0,.2,1);--ease-em:cubic-bezier(.05,.7,.1,1);--dur:250ms;--dur-l:420ms;--primary:#ff3355;--on-primary:#4a0011;--surface:#16181d;--surface-c:#1d2024;--outline:#44464f;--on-surface:#e2e2e9;--on-surface-variant:#c6c6d0;--muted:#8f9099}
 @keyframes m3-enter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 a,button{transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease),border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
 .card{transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),transform var(--dur) var(--ease-em)}
@@ -340,7 +340,7 @@ h1{font-family:Inter,system-ui,sans-serif;font-weight:700;font-size:clamp(32px,9
 .card:nth-of-type(2){animation-delay:.05s}
 .card:nth-of-type(3){animation-delay:.1s}
 .card:nth-of-type(4){animation-delay:.15s}
-.card:hover{border-color:rgba(255,183,124,.35);box-shadow:0 4px 8px 3px rgba(0,0,0,.2)}
+.card:hover{border-color:rgba(255,51,85,.35);box-shadow:0 4px 8px 3px rgba(0,0,0,.2)}
 .card-title{font:500 11px 'JetBrains Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.16em;color:var(--on-surface-variant);margin:0 0 10px}
 .big{font-size:17px;font-weight:500;margin:0 0 12px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline;margin:6px 0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:var(--on-surface-variant)}
@@ -367,6 +367,7 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	st.Domain = r.Host
 	st.What = hostWhat(r.Host)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Refresh", "5")
 	var b strings.Builder
 	b.WriteString("<!doctype html><html lang=en><head><meta charset=utf-8>")

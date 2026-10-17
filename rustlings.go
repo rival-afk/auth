@@ -58,11 +58,21 @@ func setStaticHeaders(w http.ResponseWriter, p string) {
 		w.Header().Set("Content-Type", "font/woff2")
 	case ".html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 	}
-	switch strings.ToLower(filepath.Ext(p)) {
-	// Движок компилятора и шрифты неизменяемы — кэшируем навсегда.
-	case ".wasm", ".bundle", ".ttf", ".otf", ".woff", ".woff2":
+	// Кэш. Хешированные ассеты Astro (/_astro/) и движок со шрифтами
+	// неизменяемы — их можно держать год. Всё остальное (html, glue
+	// /wasm/runner.js, картинки) обязательно ревалидируется по
+	// Last-Modified: иначе после деплоя человек остаётся на старой
+	// странице со старым JS и не видит правок.
+	ext := strings.ToLower(filepath.Ext(p))
+	switch {
+	case strings.Contains(filepath.ToSlash(p), "/_astro/"):
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	case ext == ".wasm", ext == ".bundle", ext == ".ttf", ext == ".otf", ext == ".woff", ext == ".woff2":
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	default:
+		w.Header().Set("Cache-Control", "no-cache")
 	}
 }
 
@@ -98,6 +108,7 @@ func (s *Server) serveStaticHost(w http.ResponseWriter, r *http.Request, dir str
 	if p := filepath.Join(dir, "404.html"); fileExists(p) {
 		b, _ := os.ReadFile(p)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write(b)
 		return

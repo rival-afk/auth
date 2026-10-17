@@ -821,7 +821,7 @@ const bwCSS = `@font-face{font-family:Inter;font-style:normal;font-weight:400;fo
 @font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:500;font-display:swap;src:url(/console/jbmono-500.ttf) format('truetype')}
 body{margin:0;padding:12px 16px;background:var(--surface);color:var(--on-surface);font:14px/1.55 Inter,system-ui,Menlo,Consolas,monospace;touch-action:manipulation;-webkit-text-size-adjust:100%}
 *{box-sizing:border-box}
-:root{--ease:cubic-bezier(.4,0,.2,1);--ease-em:cubic-bezier(.05,.7,.1,1);--dur:250ms;--dur-l:420ms;--primary:#ffb77c;--on-primary:#2b1400;--surface:#16181d;--surface-c:#1d2024;--surface-ch:#262a2f;--outline:#44464f;--on-surface:#e2e2e9;--on-surface-variant:#c6c6d0;--muted:#8f9099}
+:root{--ease:cubic-bezier(.4,0,.2,1);--ease-em:cubic-bezier(.05,.7,.1,1);--dur:250ms;--dur-l:420ms;--primary:#ff3355;--on-primary:#4a0011;--surface:#16181d;--surface-c:#1d2024;--surface-ch:#262a2f;--outline:#44464f;--on-surface:#e2e2e9;--on-surface-variant:#c6c6d0;--muted:#8f9099}
 @keyframes m3-enter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 @keyframes m3-scale{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
 button,.btn,input,textarea,select,a{transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease),border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),transform var(--dur) var(--ease-em),opacity var(--dur) var(--ease)}
@@ -830,19 +830,19 @@ button,.btn,input,textarea,select,a{transition:background-color var(--dur) var(-
 a{color:var(--primary)}a:hover{background:var(--primary);color:var(--on-primary)}
 .box{border:1px solid var(--outline);background:var(--surface-c);border-radius:16px;padding:10px 14px;margin:12px 0;overflow-wrap:break-word;word-break:break-word}
 button,.btn{background:transparent;color:var(--primary);border:1px solid var(--outline);border-radius:999px;padding:7px 18px;font:500 13px Inter,system-ui,monospace;cursor:pointer;text-decoration:none;display:inline-block;-webkit-appearance:none;appearance:none}
-button:hover,.btn:hover{background:rgba(255,183,124,.12);border-color:var(--primary)}
+button:hover,.btn:hover{background:rgba(255,51,85,.12);border-color:var(--primary)}
 button:active,.btn:active{transform:scale(.97)}
 button:disabled{border-color:var(--outline);color:#6b6d76;cursor:default}
 button:disabled:hover{background:transparent;border-color:var(--outline)}
 input,textarea,select{background:var(--surface);color:var(--on-surface);border:1px solid var(--outline);border-radius:10px;padding:8px 10px;font:13px Inter,system-ui,monospace;-webkit-appearance:none;appearance:none;max-width:100%}
 input::placeholder,textarea::placeholder{color:#6b6d76}
-input:focus,textarea:focus,select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(255,183,124,.16)}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(255,51,85,.16)}
 input[type=file]{padding:4px 6px;color:var(--muted);font-size:12px;width:100%}
 input[type=file]::file-selector-button{background:transparent;color:var(--primary);border:1px solid var(--outline);border-radius:999px;padding:5px 14px;font:12px Inter,system-ui,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none;appearance:none}
-input[type=file]::file-selector-button:hover{background:rgba(255,183,124,.12);border-color:var(--primary)}
+input[type=file]::file-selector-button:hover{background:rgba(255,51,85,.12);border-color:var(--primary)}
 input[type=file]:hover{border-color:var(--muted)}
 input[type=file]::-webkit-file-upload-button{background:transparent;color:var(--primary);border:1px solid var(--outline);border-radius:999px;padding:5px 14px;font:12px Inter,system-ui,monospace;cursor:pointer;margin-right:10px;-webkit-appearance:none}
-input[type=file]::-webkit-file-upload-button:hover{background:rgba(255,183,124,.12);border-color:var(--primary)}
+input[type=file]::-webkit-file-upload-button:hover{background:rgba(255,51,85,.12);border-color:var(--primary)}
 table{border-collapse:collapse;width:100%;table-layout:fixed}td,th{border:1px solid #2f323a;padding:4px 10px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:0}
 td:nth-child(3),th:nth-child(3){white-space:normal;word-break:break-all}
 .dim{color:var(--muted);font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px}
@@ -899,6 +899,7 @@ func (s *Server) loginPageHandler(w http.ResponseWriter, r *http.Request) {
 		rd = "https://mind.rival-afk.com/console"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	page := `<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — login</title><style>` + bwCSS + loginCSS + `</style></head><body oncontextmenu="return false">
 <main class=page>
 <div class=card>
@@ -1145,6 +1146,7 @@ func (s *Server) consolePageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	label := claims.UN
 	if label == "" {
 		label = claims.KID
@@ -1350,6 +1352,7 @@ func (s *Server) errorPageHandler(w http.ResponseWriter, r *http.Request) {
 		code = "unknown"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(200)
 	page := `<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>rival — error</title><style>` + bwCSS + `
 .center{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:80vh;text-align:center}
