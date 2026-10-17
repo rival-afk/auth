@@ -48,6 +48,7 @@ type Config struct {
 	BootstrapAdmin string              `json:"bootstrap_admin_pubkey"`
 	NetToken       string              `json:"net_token"`
 	Hosts          map[string]*HostCfg `json:"hosts"`
+	StaticHosts    map[string]string   `json:"static_hosts"`
 	Jump           *JumpCfg            `json:"jump"`
 }
 
@@ -141,6 +142,23 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL DEFAULT 'user',
   caps TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rustlings_progress (
+  user_id TEXT NOT NULL,
+  course_id TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 0,
+  visited_at TEXT,
+  completed_at TEXT,
+  PRIMARY KEY (user_id, course_id, slug)
+);
+CREATE TABLE IF NOT EXISTS rustlings_last_lesson (
+  user_id TEXT NOT NULL,
+  course_id TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  title TEXT,
+  updated_at TEXT,
+  PRIMARY KEY (user_id, course_id)
 );`)
 	if err != nil {
 		return err
@@ -788,7 +806,7 @@ func main() {
 		log.Fatalf("bootstrap: %v", err)
 	}
 
-	handler := s.mux()
+	handler := s.hostRouter(s.mux())
 
 	if cfg.PlainListen != "" {
 		go func() {
