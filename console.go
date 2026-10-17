@@ -850,6 +850,31 @@ xterm{height:100%}
 .xterm{user-select:text;-webkit-user-select:text}
 .xterm .xterm-screen{user-select:text;-webkit-user-select:text}`
 
+const loginCSS = `
+body{padding:0}
+main.page{min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:28px 16px}
+.card{width:100%;max-width:560px}
+.head{text-align:center;margin:0 0 22px}
+.banner{font-size:clamp(34px,11vw,64px);letter-spacing:.2em;text-indent:.2em;margin:0}
+.sub{color:#888;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;letter-spacing:.04em;margin:10px 0 0}
+.panel{border:1px solid #555;background:#050505;padding:16px 18px;margin:0 0 14px}
+.panel.muted{opacity:.75}
+.panel-title{font:500 12px 'JetBrains Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.14em;color:#bbb;margin:0 0 4px}
+.field{display:block;font:400 11px 'JetBrains Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:#777;margin:14px 0 5px}
+.panel input,.panel textarea{width:100%;padding:9px 11px;font-size:14px}
+.panel p.dim{margin:12px 0 0}
+.msg{margin:14px 0 0}
+.msg:empty{border-color:transparent;padding:0;min-height:0}
+.actions{display:flex;gap:10px;margin-top:14px}
+.actions button{flex:1;padding:9px 16px}
+button.primary{background:#fff;color:#000;border-color:#fff;font-weight:500}
+button.primary:hover{background:#000;color:#fff}
+.quick{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}
+.foot{text-align:center;margin:18px 0 0}
+.foot .btn{padding:7px 18px}
+@media (max-height:620px){main.page{align-items:flex-start}}
+`
+
 func htmlEsc(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
 	return r.Replace(s)
@@ -864,32 +889,43 @@ func (s *Server) loginPageHandler(w http.ResponseWriter, r *http.Request) {
 		rd = "https://mind.rival-afk.com/console"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	page := `<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — login</title><style>` + bwCSS + `</style></head><body oncontextmenu="return false">
+	page := `<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>rival — login</title><style>` + bwCSS + loginCSS + `</style></head><body oncontextmenu="return false">
+<main class=page>
+<div class=card>
+<div class=head>
 <div class=banner>RIVAL</div>
-<div class=box style="max-width:560px">
-<p><b>account</b></p>
-<input id=un placeholder="username" autocomplete="username" style="width:100%">
-<input id=pw type=password placeholder="password" autocomplete="current-password" style="width:100%">
+<p class=sub>sign in to your account</p>
+</div>
+<section class=panel>
+<div class=panel-title>account</div>
+<label class=field for=un>username</label>
+<input id=un placeholder="username" autocomplete="username">
+<label class=field for=pw>password</label>
+<input id=pw type=password placeholder="password" autocomplete="current-password">
 <div class=msg id=msg data-ph="…"></div>
-<button id=loginbtn>login</button>
+<div class=actions>
+<button id=loginbtn class=primary>login</button>
 <button id=regbtn>register</button>
+</div>
 <p class=dim>after login the browser generates an ed25519 key and stores it in
 your secret storage (indexeddb) for one-click quick login. private key never
 leaves the browser.</p>
-<div id=quickbox style="display:none">
+<div id=quickbox class=quick style="display:none">
 <button id=quickbtn>quick login</button>
 <span class=dim id=quickinfo></span>
 </div>
-</div>
-<div class=box style="max-width:560px;opacity:.65">
-<p><b>or .rsh key</b> <span class=dim>(secondary)</span></p>
+</section>
+<section class="panel muted">
+<div class=panel-title>or .rsh key <span class=dim>(secondary)</span></div>
 <p class=dim>select your private key file (~/.rsh/id):</p>
-<input type=file id=kf style="width:100%">
+<input type=file id=kf>
 <p class=dim>or paste public key, then sign with matching private key file above:</p>
-<textarea id=pub rows=3 style="width:100%"></textarea>
+<textarea id=pub rows=3></textarea>
 <button id=kgo disabled>login with key</button>
+</section>
+<div class=foot><a class=btn href=/>← back</a></div>
 </div>
-<a class=btn href=/>back</a>
+</main>
 <input type=hidden id=rd value="` + htmlEsc(rd) + `">
 <script>
 // disable zoom: ctrl+wheel, pinch, double-tap
@@ -1022,7 +1058,7 @@ document.getElementById('pw').addEventListener('keydown',(e)=>{if(e.key==='Enter
   try{
     const rec=await idbGet('default');
     if(rec&&rec.pubSsh){
-      document.getElementById('quickbox').style.display='block';
+      document.getElementById('quickbox').style.display='flex';
       document.getElementById('quickinfo').textContent=rec.user?('as '+rec.user):'';
       document.getElementById('quickbtn').onclick=async()=>{
         msg('quick login…');

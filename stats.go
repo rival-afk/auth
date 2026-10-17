@@ -320,6 +320,35 @@ func (s *Server) statsJSONHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, st)
 }
 
+const authStatusCSS = `
+@font-face{font-family:Inter;font-style:normal;font-weight:400;font-display:swap;src:url(/console/inter-400.ttf) format('truetype')}
+@font-face{font-family:Inter;font-style:normal;font-weight:500;font-display:swap;src:url(/console/inter-500.ttf) format('truetype')}
+@font-face{font-family:Gasoek;font-style:normal;font-weight:400;font-display:swap;src:url(/console/gasoek.ttf) format('truetype')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(/console/jbmono-400.ttf) format('truetype')}
+*{box-sizing:border-box}
+body{margin:0;padding:28px 16px;background:#000;color:#e8e8e8;font:14px/1.55 Inter,system-ui,sans-serif}
+.wrap{max-width:760px;margin:0 auto}
+.head{text-align:center;margin:0 0 22px}
+h1{font-family:Gasoek,Inter,sans-serif;font-weight:400;font-size:clamp(32px,9vw,56px);line-height:1;letter-spacing:.2em;text-indent:.2em;text-transform:uppercase;margin:0}
+.sub{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#888;letter-spacing:.06em;margin:10px 0 0}
+.card{border:1px solid #2a2a2a;background:#050505;padding:16px 18px;margin:0 0 14px}
+.card-title{font:500 11px 'JetBrains Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.16em;color:#8a8a8a;margin:0 0 10px}
+.big{font-size:17px;font-weight:400;margin:0 0 12px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline;margin:6px 0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:#c8c8c8}
+.k{color:#6a6a6a;text-transform:uppercase;font-size:10.5px;letter-spacing:.12em;min-width:88px}
+.dim{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#888;margin:0 0 12px}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
+td{border-top:1px solid #1e1e1e;padding:7px 10px;vertical-align:top;text-align:left;word-break:break-word}
+tr:first-child td{border-top:0}
+td:first-child{color:#fff;white-space:nowrap}
+.lat{color:#8a8a8a}
+.peers{margin:0;padding-left:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:#b0b0b0}
+.foot{text-align:center;margin:18px 0 0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#6a6a6a}
+a{color:#e8e8e8}
+a:hover{color:#000;background:#e8e8e8}
+`
+
 func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
 		s.statsJSONHandler(w, r)
@@ -331,17 +360,24 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Refresh", "5")
 	var b strings.Builder
-	b.WriteString("<!doctype html><meta charset=utf-8><title>rival status</title>")
-	b.WriteString("<meta http-equiv=refresh content=5>")
-	b.WriteString("<body style=\"font:14px monospace;background:#0b0f14;color:#cfe3ff;padding:20px\">")
-	fmt.Fprintf(&b, "<h2>%s</h2>", st.What)
-	fmt.Fprintf(&b, "<p style='color:#8fb4ff'>you reached: <b>%s</b></p>", st.Domain)
-	fmt.Fprintf(&b, "<p>%s &middot; %s &middot; %s &middot; up %ss</p>", st.Server["hostname"], st.Server["os"], st.Server["arch"], st.Server["uptime_s"])
-	fmt.Fprintf(&b, "<p>kernel %s &middot; cores %v &middot; load %v/%v/%v &middot; mem %v/%v MB &middot; disk %v</p>",
-		st.Server["kernel"], st.Load["cpu_count"], st.Load["load1"], st.Load["load5"], st.Load["load15"], st.Load["mem_used_mb"], st.Load["mem_total_mb"], st.Load["disk"])
-	b.WriteString("<h3>services</h3>")
-	b.WriteString("<p style='color:#8fb4ff'>ping: <b id=youvps>measuring…</b> = you→vps; each row shows <b>you→vps→device</b> (vps reports its own leg to the device)</p>")
-	b.WriteString("<table border=0 cellpadding=4>")
+	b.WriteString("<!doctype html><html lang=en><head><meta charset=utf-8>")
+	b.WriteString("<meta name=viewport content=\"width=device-width,initial-scale=1\">")
+	b.WriteString("<title>rival — auth</title><meta http-equiv=refresh content=5><style>")
+	b.WriteString(authStatusCSS)
+	b.WriteString("</style></head><body>")
+	b.WriteString("<main class=wrap><header class=head><h1>rival</h1><p class=sub>auth API &middot; rsh gateway</p></header>")
+	b.WriteString("<section class=card><div class=card-title>server</div>")
+	fmt.Fprintf(&b, "<p class=big>%s</p>", st.What)
+	fmt.Fprintf(&b, "<p class=row><span class=k>you reached</span><b>%s</b></p>", st.Domain)
+	fmt.Fprintf(&b, "<p class=row><span class=k>host</span><span>%s &middot; %s &middot; %s &middot; up %ss</span></p>", st.Server["hostname"], st.Server["os"], st.Server["arch"], st.Server["uptime_s"])
+	fmt.Fprintf(&b, "<p class=row><span class=k>kernel</span><span>%s &middot; cores %v &middot; load %v/%v/%v</span></p>",
+		st.Server["kernel"], st.Load["cpu_count"], st.Load["load1"], st.Load["load5"], st.Load["load15"])
+	fmt.Fprintf(&b, "<p class=row><span class=k>memory</span><span>%v / %v MB &middot; disk %v</span></p>",
+		st.Load["mem_used_mb"], st.Load["mem_total_mb"], st.Load["disk"])
+	b.WriteString("</section>")
+	b.WriteString("<section class=card><div class=card-title>services</div>")
+	b.WriteString("<p class=dim>ping: <b id=youvps>measuring…</b> = you&rarr;vps; each row shows <b>you&rarr;vps&rarr;device</b> (vps reports its own leg to the device)</p>")
+	b.WriteString("<div class=tablewrap><table>")
 	for _, sv := range st.Services {
 		state := "<span style=color:#e5534b>DOWN</span>"
 		if sv.Up {
@@ -351,18 +387,16 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, "<tr data-svc=\"%s\" data-ms=\"%s\"><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
 			sv.Name, strconv.FormatFloat(sv.Latency, 'f', 3, 64), sv.Name, state, sv.Detail, sv.Error)
 	}
-	b.WriteString("</table>")
-	if len(st.Services) > 0 {
-	}
+	b.WriteString("</table></div></section>")
 	if len(st.NetPeers) > 0 {
-		b.WriteString("<h3>net peers</h3><ul>")
+		b.WriteString("<section class=card><div class=card-title>net peers</div><ul class=peers>")
 		for _, p := range st.NetPeers {
 			fmt.Fprintf(&b, "<li>%v = %v (seen %v)</li>", p["label"], p["ip"], p["seen"])
 		}
-		b.WriteString("</ul>")
+		b.WriteString("</ul></section>")
 	}
-	fmt.Fprintf(&b, "<p style='color:#6b7a90'>refreshed %s &middot; json: <a href='/?format=json'>/?format=json</a></p>", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(&b, "<p class=foot>refreshed %s &middot; json: <a href='/?format=json'>/?format=json</a></p></main>", time.Now().Format(time.RFC3339))
 	b.WriteString("<script>(async()=>{const f=v=>Number(v).toFixed(2);const el=document.getElementById('youvps');const s=[];for(let i=0;i<3;i++){const t0=performance.now();try{await fetch('/healthz',{cache:'no-store'});}catch(e){}s.push(performance.now()-t0);}const rtt=Math.min(...s);el.textContent=f(rtt)+'ms';document.querySelectorAll('tr[data-ms]').forEach(tr=>{const base=parseFloat(tr.getAttribute('data-ms'))||0;const v=(tr.getAttribute('data-svc')==='vps')?rtt:rtt+base;const lat=tr.querySelector('.lat');if(lat){lat.textContent=f(v)+'ms';lat.title='you→vps '+f(rtt)+'ms + vps→device '+f(base)+'ms';}});})();</script>")
-	b.WriteString("</body>")
+	b.WriteString("</body></html>")
 	w.Write([]byte(b.String()))
 }

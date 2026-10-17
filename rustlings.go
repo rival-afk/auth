@@ -50,12 +50,18 @@ func setStaticHeaders(w http.ResponseWriter, p string) {
 		w.Header().Set("Content-Type", "image/webp")
 	case ".ttf":
 		w.Header().Set("Content-Type", "font/ttf")
+	case ".otf":
+		w.Header().Set("Content-Type", "font/otf")
+	case ".woff":
+		w.Header().Set("Content-Type", "font/woff")
+	case ".woff2":
+		w.Header().Set("Content-Type", "font/woff2")
 	case ".html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	}
 	switch strings.ToLower(filepath.Ext(p)) {
 	// Движок компилятора и шрифты неизменяемы — кэшируем навсегда.
-	case ".wasm", ".bundle", ".ttf":
+	case ".wasm", ".bundle", ".ttf", ".otf", ".woff", ".woff2":
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
 }
