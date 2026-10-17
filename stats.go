@@ -323,30 +323,39 @@ func (s *Server) statsJSONHandler(w http.ResponseWriter, r *http.Request) {
 const authStatusCSS = `
 @font-face{font-family:Inter;font-style:normal;font-weight:400;font-display:swap;src:url(/console/inter-400.ttf) format('truetype')}
 @font-face{font-family:Inter;font-style:normal;font-weight:500;font-display:swap;src:url(/console/inter-500.ttf) format('truetype')}
-@font-face{font-family:Gasoek;font-style:normal;font-weight:400;font-display:swap;src:url(/console/gasoek.ttf) format('truetype')}
+@font-face{font-family:Inter;font-style:normal;font-weight:700;font-display:swap;src:url(/console/inter-700.ttf) format('truetype')}
 @font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(/console/jbmono-400.ttf) format('truetype')}
 *{box-sizing:border-box}
-body{margin:0;padding:28px 16px;background:#000;color:#e8e8e8;font:14px/1.55 Inter,system-ui,sans-serif}
-.wrap{max-width:760px;margin:0 auto}
+:root{--ease:cubic-bezier(.4,0,.2,1);--ease-em:cubic-bezier(.05,.7,.1,1);--dur:250ms;--dur-l:420ms;--primary:#ffb77c;--on-primary:#2b1400;--surface:#16181d;--surface-c:#1d2024;--outline:#44464f;--on-surface:#e2e2e9;--on-surface-variant:#c6c6d0;--muted:#8f9099}
+@keyframes m3-enter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+a,button{transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease),border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+.card{transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),transform var(--dur) var(--ease-em)}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
+body{margin:0;padding:28px 16px;background:var(--surface);color:var(--on-surface);font:14px/1.55 Inter,system-ui,sans-serif}
+.wrap{max-width:760px;margin:0 auto;animation:m3-enter var(--dur-l) var(--ease-em) both}
 .head{text-align:center;margin:0 0 22px}
-h1{font-family:Gasoek,Inter,sans-serif;font-weight:400;font-size:clamp(32px,9vw,56px);line-height:1;letter-spacing:.2em;text-indent:.2em;text-transform:uppercase;margin:0}
-.sub{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#888;letter-spacing:.06em;margin:10px 0 0}
-.card{border:1px solid #2a2a2a;background:#050505;padding:16px 18px;margin:0 0 14px}
-.card-title{font:500 11px 'JetBrains Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.16em;color:#8a8a8a;margin:0 0 10px}
-.big{font-size:17px;font-weight:400;margin:0 0 12px}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline;margin:6px 0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:#c8c8c8}
-.k{color:#6a6a6a;text-transform:uppercase;font-size:10.5px;letter-spacing:.12em;min-width:88px}
-.dim{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#888;margin:0 0 12px}
+h1{font-family:Inter,system-ui,sans-serif;font-weight:700;font-size:clamp(32px,9vw,52px);line-height:1.05;letter-spacing:-.02em;text-transform:none;margin:0}
+.sub{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:var(--muted);letter-spacing:.02em;margin:10px 0 0}
+.card{border:1px solid rgba(68,70,79,.7);background:var(--surface-c);border-radius:28px;padding:18px 20px;margin:0 0 14px;box-shadow:0 1px 2px rgba(0,0,0,.35);animation:m3-enter var(--dur-l) var(--ease-em) both}
+.card:nth-of-type(2){animation-delay:.05s}
+.card:nth-of-type(3){animation-delay:.1s}
+.card:nth-of-type(4){animation-delay:.15s}
+.card:hover{border-color:rgba(255,183,124,.35);box-shadow:0 4px 8px 3px rgba(0,0,0,.2)}
+.card-title{font:500 11px 'JetBrains Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.16em;color:var(--on-surface-variant);margin:0 0 10px}
+.big{font-size:17px;font-weight:500;margin:0 0 12px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline;margin:6px 0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:var(--on-surface-variant)}
+.k{color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.12em;min-width:88px}
+.dim{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:var(--muted);margin:0 0 12px}
 .tablewrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
-td{border-top:1px solid #1e1e1e;padding:7px 10px;vertical-align:top;text-align:left;word-break:break-word}
+td{border-top:1px solid #2f323a;padding:7px 10px;vertical-align:top;text-align:left;word-break:break-word}
 tr:first-child td{border-top:0}
 td:first-child{color:#fff;white-space:nowrap}
-.lat{color:#8a8a8a}
-.peers{margin:0;padding-left:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:#b0b0b0}
-.foot{text-align:center;margin:18px 0 0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#6a6a6a}
-a{color:#e8e8e8}
-a:hover{color:#000;background:#e8e8e8}
+.lat{color:var(--muted)}
+.peers{margin:0;padding-left:18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:var(--on-surface-variant)}
+.foot{text-align:center;margin:18px 0 0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:var(--muted)}
+a{color:var(--primary)}
+a:hover{color:var(--on-primary);background:var(--primary)}
 `
 
 func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
