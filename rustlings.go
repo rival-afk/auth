@@ -42,6 +42,12 @@ func proxyHost(w http.ResponseWriter, r *http.Request, target string) {
 		return
 	}
 	rp := httputil.NewSingleHostReverseProxy(u)
+	orig := rp.Director
+	rp.Director = func(req *http.Request) {
+		orig(req)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-Host", req.Host)
+	}
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		http.Error(w, "backend offline", http.StatusBadGateway)
 	}
