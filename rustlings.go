@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,8 +25,27 @@ func (s *Server) hostRouter(next http.Handler) http.Handler {
 			s.serveStaticHost(w, r, dir)
 			return
 		}
+		if target, ok := s.cfg.ProxyHosts[host]; ok {
+			proxyHost(w, r, target)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// proxyHost reverse-proxies an entire host to a local upstream URL
+// (e.g. nolejje.rival-afk.com -> http://127.0.0.1:18000 through the phone tunnel).
+func proxyHost(w http.ResponseWriter, r *http.Request, target string) {
+	u, err := url.Parse(target)
+	if err != nil {
+		http.Error(w, "bad proxy target", http.StatusBadGateway)
+		return
+	}
+	rp := httputil.NewSingleHostReverseProxy(u)
+	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+		http.Error(w, "backend offline", http.StatusBadGateway)
+	}
+	rp.ServeHTTP(w, r)
 }
 
 func fileExists(p string) bool {

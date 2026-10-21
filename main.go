@@ -49,6 +49,7 @@ type Config struct {
 	NetToken       string              `json:"net_token"`
 	Hosts          map[string]*HostCfg `json:"hosts"`
 	StaticHosts    map[string]string   `json:"static_hosts"`
+	ProxyHosts     map[string]string   `json:"proxy_hosts"`
 	Jump           *JumpCfg            `json:"jump"`
 }
 
