@@ -62,7 +62,7 @@ func (s *Server) provisionAdmin(hcfg *HostCfg, user, pubLine, comment string) er
 	ak := R + "/rootfs/home/" + user + "/.ssh/authorized_keys"
 
 	// sshd Match: chroot всех zs_* внутрь /srv/zsandbox/<user> (rootfs).
-	matchBlock := "Match User zs_*\n    AuthorizedKeysFile " + s.cfg.SandboxPrefix + "/%u/rootfs/home/%u/.ssh/authorized_keys\n    ChrootDirectory /srv/zsandbox/%u\n    PermitTTY yes\n    X11Forwarding no\n    AllowTcpForwarding no\n    Banner none\n"
+	matchBlock := "Match User zs_*\n    AuthorizedKeysFile " + s.cfg.SandboxPrefix + "/%u/rootfs/home/%u/.ssh/authorized_keys\n    ChrootDirectory " + s.cfg.SandboxPrefix + "/%u/rootfs\n    PermitTTY yes\n    X11Forwarding no\n    AllowTcpForwarding no\n    Banner none\n"
 	// хост-хелпер: doas->root, но apk гоняет только ВНУТРИ rootfs звонящего.
 	helper := `#!/bin/sh
 # pak host helper: apk install inside the CALLER'S sandbox rootfs only.
@@ -85,6 +85,8 @@ sed -i "s/^$N:!\+/$N:*:/" /etc/shadow 2>/dev/null || true
 G=$(id -g $N)
 grep -q "Match User zs_" /etc/ssh/sshd_config 2>/dev/null || cat >> /etc/ssh/sshd_config <<'ZSCONF'
 ` + matchBlock + `ZSCONF
+sed -i "s|^    ChrootDirectory /srv/zsandbox/%u\$|    ChrootDirectory /srv/zsandbox/%u/rootfs|" /etc/ssh/sshd_config 2>/dev/null || true
+mkdir -p "$R/rootfs/srv/zsandbox/$N" && ln -snf / "$R/rootfs/srv/zsandbox/$N/rootfs"
 if [ ! -d "$R/rootfs/bin" ]; then
   mkdir -p "$R" && chmod 755 "$R" && mkdir -p "$R/rootfs"
   Z=/var/tmp/amr.$$
