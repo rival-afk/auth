@@ -366,7 +366,9 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetComment := "rt:" + claims.KID + ":" + req.Host
+	// ttl-слоты: комментарий несёт время выдачи — старые неактивные слоты
+	// чистятся при следующем provision того же kid+host
+	targetComment := fmt.Sprintf("rt:%s:%s:%d", claims.KID, req.Host, time.Now().Unix())
 	tPriv, tPub, err := genKeyPair(targetComment)
 	if err != nil {
 		writeErr(w, 500, "keygen: "+err.Error())
