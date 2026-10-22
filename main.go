@@ -655,9 +655,13 @@ func (s *Server) provision(hcfg *HostCfg, pubLine string, restricted bool) error
 	if restricted {
 		line = `command="/bin/false",restrict,port-forwarding ` + pubLine
 	}
+	// ttl-слоты: comment виду rt:<kid>:<host>:<unix-ts>; профилактически удаляем
+	// свои слоты старше slotTTL (неактивные строки чужих ключ-id и legacy не трогаем)
+	prefix := rtSlotPrefix(comment) + ":"
+	cutoff := time.Now().Add(-slotTTL).Unix()
 	remote := fmt.Sprintf(
-		"mkdir -p $(dirname %[1]s) && touch %[1]s && chmod 700 $(dirname %[1]s) && chmod 600 %[1]s && sed -i '\\| %[2]s|d' %[1]s && echo '%[3]s' >> %[1]s",
-		ak, comment, line)
+		"mkdir -p $(dirname %[1]s) && touch %[1]s && chmod 700 $(dirname %[1]s) && chmod 600 %[1]s && awk -v p='%[2]s' -v c=%[3]d '{ if (index($0, p) > 0) { ts=substr($0, index($0, p)+length(p)); gsub(/[^0-9].*/, \"\", ts); if (ts+0 < c) next } print }' %[1]s > %[1]s.tmp && mv %[1]s.tmp %[1]s && chmod 600 %[1]s && echo '%[4]s' >> %[1]s",
+		ak, prefix, cutoff, line)
 	args := []string{
 		"-i", s.cfg.Provisioner,
 		"-p", fmt.Sprintf("%d", hcfg.Port),
@@ -688,20 +692,48 @@ func (s *Server) provisionLocal(hcfg *HostCfg, pubLine string, restricted bool) 
 	if err := os.MkdirAll(filepath.Dir(ak), 0o700); err != nil {
 		return err
 	}
+	prefix := rtSlotPrefix(comment) + ":"
+	cut := time.Now().Add(-slotTTL).Unix()
 	var keep []string
 	if b, err := os.ReadFile(ak); err == nil {
 		for _, l := range strings.Split(string(b), "\n") {
 			if strings.TrimSpace(l) == "" {
 				continue
 			}
-			if strings.Contains(l, " "+comment) {
-				continue
+			// ttl-слоты rt:<kid>:<host>:<ts>: удаляем свои с ts < cut;
+			// legacy (без ts) и чужие комментарии не трогаем
+			if i := strings.Index(l, prefix); i >= 0 {
+				dig := ""
+				for _, r := range l[i+len(prefix):] {
+					if r < '0' || r > '9' {
+						break
+					}
+					dig += string(r)
+				}
+				if dig != "" {
+					var t int64
+					fmt.Sscanf(dig, "%d", &t)
+					if t < cut {
+						continue
+					}
+				}
 			}
 			keep = append(keep, l)
 		}
 	}
 	keep = append(keep, line)
 	return os.WriteFile(ak, []byte(strings.Join(keep, "\n")+"\n"), 0o600)
+}
+
+const slotTTL = 2 * time.Hour
+
+// rtSlotPrefix: "rt:<kid>:<host>:<ts>" -> "rt:<kid>:<host>" (без хвоста-времени)
+func rtSlotPrefix(comment string) string {
+	i := strings.LastIndex(comment, ":")
+	if i < 0 {
+		return comment
+	}
+	return comment[:i]
 }
 
 func extractComment(pubLine string) string {
