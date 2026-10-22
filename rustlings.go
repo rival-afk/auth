@@ -21,6 +21,13 @@ func (s *Server) hostRouter(next http.Handler) http.Handler {
 		if i := strings.IndexByte(host, ':'); i >= 0 {
 			host = host[:i]
 		}
+		// Личная страница itz_rival на apex — статика + её API (/api/dev).
+		if host == "rival-afk.com" || host == "www.rival-afk.com" {
+			if strings.HasPrefix(r.URL.Path, "/api/dev") {
+				s.devAPIRouter(w, r)
+				return
+			}
+		}
 		if dir, ok := s.cfg.StaticHosts[host]; ok {
 			s.serveStaticHost(w, r, dir)
 			return
