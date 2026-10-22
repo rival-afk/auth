@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -320,6 +321,18 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// clientIP — публичный IP клиента (моён auth-сервера): для -t (право на tmp-папку).
+func clientIP(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
+		return v
+	}
+	h, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return h
+}
+
 func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 	claims, ok := s.requireAuth(w, r)
 	if !ok {
@@ -370,6 +383,7 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 		"addr":        hcfg.Addr,
 		"port":        hcfg.Port,
 		"private_key": string(tPriv),
+		"client_ip":   clientIP(r),
 	}
 
 	if !hcfg.Local && s.cfg.Jump != nil {
