@@ -100,6 +100,15 @@ func setStaticHeaders(w http.ResponseWriter, p string) {
 	// Last-Modified: иначе после деплоя человек остаётся на старой
 	// странице со старым JS и не видит правок.
 	ext := strings.ToLower(filepath.Ext(p))
+	// CORS для статики: все субдомены rival-afk.com тянут шрифты/стили
+	// с центрального хоста (fileshare, nolejje и будущие сайты —
+	// один стиль и одни шрифты на всю экосистему).
+	switch ext {
+	case ".woff2", ".woff", ".ttf", ".otf", ".css", ".svg", ".png", ".jpg",
+		".jpeg", ".webp", ".ico", ".json", ".wasm", ".map", ".js":
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	}
 	switch {
 	case strings.Contains(filepath.ToSlash(p), "/_astro/"):
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
