@@ -81,7 +81,7 @@ exec doas /usr/local/sbin/zs-pak "$@"
 	b.WriteString("set -eu\n")
 	fmt.Fprintf(&b, "N=%s\nR=%s\nP=$(id -u $N 2>/dev/null || true)\n", shQ1(user), shQ1(R))
 	b.WriteString(`if [ -z "$P" ]; then mkdir -p /srv/zsandbox/"$N"/rootfs/home/"$N"; adduser -D -h /srv/zsandbox/"$N"/rootfs/home/"$N" -s /bin/sh "$N" >/dev/null 2>&1 || adduser -D -s /bin/sh "$N"; P=$(id -u $N); fi
-sed -i "s/^$N:!!:/$N:*:/" /etc/shadow 2>/dev/null || true
+sed -i "s/^$N:!\+/$N:*:/" /etc/shadow 2>/dev/null || true
 G=$(id -g $N)
 grep -q "Match User zs_" /etc/ssh/sshd_config 2>/dev/null || cat >> /etc/ssh/sshd_config <<'ZSCONF'
 ` + matchBlock + `ZSCONF
