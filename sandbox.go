@@ -58,7 +58,7 @@ func (s *Server) provisionAdmin(hcfg *HostCfg, user, pubLine, comment string) er
 	prefix := rtSlotPrefix(comment)
 	// prefix уже "rt:<kid>:<host>" — awk-фильтр ищет слот со своими слотами
 
-	dlURL := "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.22.1-x86_64.tar.gz"
+	dlURL := "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.1-x86_64.tar.gz"
 	ak := R + "/rootfs/home/" + user + "/.ssh/authorized_keys"
 
 	// sshd Match: chroot всех zs_* внутрь /srv/zsandbox/<user> (rootfs).
