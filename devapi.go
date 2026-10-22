@@ -223,8 +223,7 @@ func (s *Server) devSubAPI(w http.ResponseWriter, r *http.Request, sub string) {
 
 // devAPIRouter вызывается из hostRouter: обрабатывает /api/dev/* для apex-домена.
 func (s *Server) devAPIRouter(w http.ResponseWriter, r *http.Request) {
-	sub := strings.TrimPrefix(r.URL.Path, "/api/dev/")
-	sub = strings.TrimSuffix(sub, "/")
+	sub := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/dev"), "/")
 	if sub == "" {
 		s.devProfileAPI(w, r)
 		return
