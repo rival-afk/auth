@@ -105,6 +105,7 @@ if [ -x /usr/bin/doas ] || [ -x /bin/doas ]; then
   D=$(command -v doas); cp -f "$D" "$R/rootfs/usr/bin/doas"; chown root:root "$R/rootfs/usr/bin/doas"; chmod 4755 "$R/rootfs/usr/bin/doas"
 fi
 echo "permit nopass $N as root cmd /usr/local/sbin/zs-pak" > "$R/rootfs/etc/doas.d/zs.conf"
+mkdir -p /usr/local/sbin
 echo '` + strings.ReplaceAll(helper, "'", `'\''`) + `' > /usr/local/sbin/zs-pak
 chmod 755 /usr/local/sbin/zs-pak
 cp -f /usr/local/sbin/zs-pak "$R/rootfs/usr/local/sbin/zs-pak"
