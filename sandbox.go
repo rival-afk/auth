@@ -62,7 +62,7 @@ func (s *Server) provisionAdmin(hcfg *HostCfg, user, pubLine, comment string) er
 	ak := R + "/rootfs/home/" + user + "/.ssh/authorized_keys"
 
 	// sshd Match: chroot всех zs_* внутрь /srv/zsandbox/<user> (rootfs).
-	matchBlock := "Match User zs_*\n    ChrootDirectory /srv/zsandbox/%u\n    PermitTTY yes\n    X11Forwarding no\n    AllowTcpForwarding no\n    Banner none\n"
+	matchBlock := "Match User zs_*\n    AuthorizedKeysFile " + s.cfg.SandboxPrefix + "/%u/rootfs/home/%u/.ssh/authorized_keys\n    ChrootDirectory /srv/zsandbox/%u\n    PermitTTY yes\n    X11Forwarding no\n    AllowTcpForwarding no\n    Banner none\n"
 	// хост-хелпер: doas->root, но apk гоняет только ВНУТРИ rootfs звонящего.
 	helper := `#!/bin/sh
 # pak host helper: apk install inside the CALLER'S sandbox rootfs only.
