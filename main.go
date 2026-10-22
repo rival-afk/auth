@@ -2,14 +2,18 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +33,8 @@ type HostCfg struct {
 	User   string `json:"user"`
 	Local  bool   `json:"local"`
 	AKPath string `json:"ak_path"`
+	// chroot-песочница для админов на этом хосте (пк)
+	Sandbox bool `json:"sandbox"`
 }
 
 type JumpCfg struct {
@@ -52,6 +58,11 @@ type Config struct {
 	StaticHosts    map[string]string   `json:"static_hosts"`
 	ProxyHosts     map[string]string   `json:"proxy_hosts"`
 	Jump           *JumpCfg            `json:"jump"`
+	// 2FA: до этой unix-метки owner/admin без включённого TOTP пускаем
+	// (grace на зачисление). 0 = grace нет. После метки: бамали denying.
+	TwoFAGrace int64 `json:"2fa_grace_until"`
+	// Песочницы админов (chroot на пк): префикс каталогов /srv/zsandbox/<user>.
+	SandboxPrefix string `json:"sandbox_prefix"`
 }
 
 type Server struct {
@@ -161,6 +172,26 @@ CREATE TABLE IF NOT EXISTS rustlings_last_lesson (
   title TEXT,
   updated_at TEXT,
   PRIMARY KEY (user_id, course_id)
+);
+CREATE TABLE IF NOT EXISTS totp (
+  kid TEXT PRIMARY KEY,
+  secret TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recovery (
+  kid TEXT NOT NULL,
+  code TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0,
+  used_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (kid, code)
+);
+CREATE TABLE IF NOT EXISTS devices (
+  kid TEXT NOT NULL,
+  token TEXT NOT NULL,
+  created INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (kid, token)
 );`)
 	if err != nil {
 		return err
@@ -194,8 +225,8 @@ CREATE TABLE IF NOT EXISTS rustlings_last_lesson (
 		s.db.Exec(`ALTER TABLE keys ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`)
 	}
 	// role model: the ssh cap implies the owner tier (root access to hosts)
-	s.db.Exec(`UPDATE keys SET role='owner' WHERE role='admin' AND caps LIKE '%"ssh"%'`)
-	s.db.Exec(`UPDATE users SET role='owner' WHERE role='admin' AND caps LIKE '%"ssh"%'`)
+	// историческая миграция отключена: раньше admin+ssh = owner (весь root).
+	// Теперь admin+ssh = песочница chroot на пк; promotion удалён.
 	return nil
 }
 
@@ -249,11 +280,280 @@ func verifyEd25519Authorized(pubSSH ssh.PublicKey, msg, sig []byte) bool {
 	return ed25519.Verify(edPub, msg, sig)
 }
 
+// ---------- 2FA (TOTP / RFC 6238) ----------
+
+// Анти-реплей: код+секрет не принимает повторно в течение 90 с
+var (
+	totpSeen   = map[string]int64{}
+	totpSeenMu sync.Mutex
+)
+
+func b32Encode(src []byte) string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+	var out strings.Builder
+	buf := 0
+	bits := 0
+	for _, b := range src {
+		buf = buf<<8 | int(b)
+		bits += 8
+		for bits >= 5 {
+			bits -= 5
+			out.WriteByte(alphabet[(buf>>uint(bits))&31])
+		}
+	}
+	if bits > 0 {
+		out.WriteByte(alphabet[(buf<<uint(5-bits))&31])
+	}
+	return out.String()
+}
+
+func b32Decode(s string) ([]byte, error) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+	var out []byte
+	buf, bits := 0, 0
+	for _, r := range strings.ToUpper(strings.TrimRight(s, "=")) {
+		i := strings.IndexRune(alphabet, r)
+		if i < 0 {
+			return nil, fmt.Errorf("bad base32 char %q", r)
+		}
+		buf = buf<<5 | i
+		bits += 5
+		if bits >= 8 {
+			bits -= 8
+			out = append(out, byte(buf>>uint(bits)))
+		}
+	}
+	return out, nil
+}
+
+// totpAt — 6-значный код SHA1/30s для unix-времени t.
+func totpAt(secret []byte, t int64) string {
+	msg := make([]byte, 8)
+	binary.BigEndian.PutUint64(msg, uint64(t/30))
+	mac := hmac.New(sha1.New, secret)
+	mac.Write(msg)
+	sum := mac.Sum(nil)
+	o := sum[19] & 0x0f
+	val := (int64(sum[o])&0x7f)<<24 | int64(sum[o+1])<<16 | int64(sum[o+2])<<8 | int64(sum[o+3])
+	return fmt.Sprintf("%06d", val%1000000)
+}
+
+// checkTOTP — окно ±1 период; защита от повтора в памяти.
+func (s *Server) checkTOTP(kid, secretB32, code string) bool {
+	sec, err := b32Decode(secretB32)
+	if err != nil || len(sec) == 0 {
+		return false
+	}
+	code = strings.TrimSpace(code)
+	if len(code) != 6 {
+		return false
+	}
+	now := time.Now().Unix()
+	for _, w := range []int64{0, -1, 1} {
+		c := totpAt(sec, now+w*30)
+		if c == code {
+			totpSeenMu.Lock()
+			k := kid + "|" + c
+			if prev, ok := totpSeen[k]; ok && now-prev < 90 {
+				totpSeenMu.Unlock()
+				return false // уже использован
+			}
+			totpSeen[k] = now
+			totpSeenMu.Unlock()
+			return true
+		}
+	}
+	return false
+}
+
+func randToken(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func randB32Secret() string {
+	b := make([]byte, 20)
+	rand.Read(b)
+	return b32Encode(b)
+}
+
+func (s *Server) totpFor(kid string) (secret string, enabled bool) {
+	row := s.db.QueryRow(`SELECT secret, enabled FROM totp WHERE kid = ?`, kid)
+	var sec string
+	var en int
+	if err := row.Scan(&sec, &en); err != nil {
+		return "", false
+	}
+	return sec, en != 0
+}
+
+func (s *Server) deviceOK(kid, token string) bool {
+	if token == "" {
+		return false
+	}
+	r, err := s.db.Exec(`UPDATE devices SET last_seen = ? WHERE kid = ? AND token = ?`,
+		time.Now().Unix(), kid, token)
+	n, _ := r.RowsAffected()
+	return err == nil && n == 1
+}
+
+// twoFAChallenge решает, пропускать ли вход: device-token, TOTP, recovery,
+// grace (пока секрет не включён). Возвращает (пропустить, новый device token).
+func (s *Server) twoFAChallenge(w http.ResponseWriter, kid, role string, totpCode, recoveryCode, devToken string) (bool, string) {
+	secret, enabled := s.totpFor(kid)
+	mandatory := enabled || role == "owner" || role == "admin"
+
+	if !mandatory {
+		return true, ""
+	}
+	// доверенное устройство?
+	if devToken != "" && s.deviceOK(kid, devToken) {
+		return true, devToken
+	}
+	// TOTP (в т.ч. при включении, и если секрет есть, но ещё не confirmed
+	// — тогда это фактическое подтверждение первого кода)
+	if secret != "" && s.checkTOTP(kid, secret, totpCode) {
+		newTok := randToken(24)
+		s.db.Exec(`INSERT INTO devices (kid, token, created, last_seen) VALUES (?,?,?,?)`,
+			kid, newTok, time.Now().Unix(), time.Now().Unix())
+		if !enabled {
+			s.db.Exec(`UPDATE totp SET enabled = 1 WHERE kid = ?`, kid)
+		}
+		return true, newTok
+	}
+	// recovery-код
+	if recoveryCode != "" {
+		res, err := s.db.Exec(`UPDATE recovery SET used = 1, used_at = ? WHERE kid = ? AND code = ? AND used = 0`,
+			time.Now().Unix(), kid, strings.TrimSpace(recoveryCode))
+		if err == nil {
+			if n, _ := res.RowsAffected(); n == 1 {
+				newTok := randToken(24)
+				s.db.Exec(`INSERT INTO devices (kid, token, created, last_seen) VALUES (?,?,?,?)`,
+					kid, newTok, time.Now().Unix(), time.Now().Unix())
+				return true, newTok
+			}
+		}
+	}
+	// подготовленный к зачислению секрет отсутствует и grace ещё жив?
+	if secret == "" && s.cfg.TwoFAGrace > 0 && time.Now().Unix() < s.cfg.TwoFAGrace {
+		return true, ""
+	}
+	writeJSON(w, 200, map[string]interface{}{"need_2fa": true})
+	return false, ""
+}
+
+// ---------- 2FA endpoints ----------
+
+func (s *Server) twofaInitHandler(w http.ResponseWriter, r *http.Request) {
+	claims, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	secret, enabled := s.totpFor(claims.KID)
+	if enabled {
+		writeErr(w, 409, "2fa already enabled (disable first)")
+		return
+	}
+	if secret == "" {
+		secret = randB32Secret()
+		s.db.Exec(`INSERT INTO totp (kid, secret, enabled, created) VALUES (?,?,0,?)`,
+			claims.KID, secret, time.Now().Unix())
+	}
+	label := url.QueryEscape(claims.KID[:8])
+	otpauth := fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=rival-auth&digits=6&period=30",
+		url.QueryEscape(s.cfg.Domain), label, secret)
+	writeJSON(w, 200, map[string]interface{}{"secret": secret, "otpauth": otpauth})
+}
+
+func (s *Server) twofaConfirmHandler(w http.ResponseWriter, r *http.Request) {
+	claims, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	secret, _ := s.totpFor(claims.KID)
+	if secret == "" {
+		writeErr(w, 400, "no pending 2fa secret (run 2fa init)")
+		return
+	}
+	if !s.checkTOTP(claims.KID, secret, req.Code) {
+		writeErr(w, 401, "wrong code")
+		return
+	}
+	s.db.Exec(`UPDATE totp SET enabled = 1 WHERE kid = ?`, claims.KID)
+	s.db.Exec(`DELETE FROM recovery WHERE kid = ?`, claims.KID)
+	var codes []string
+	for i := 0; i < 6; i++ {
+		c := randToken(4) // 8 hex
+		codes = append(codes, c)
+		s.db.Exec(`INSERT INTO recovery (kid, code, used, used_at) VALUES (?,?,0,0)`, claims.KID, c)
+	}
+	newTok := randToken(24)
+	s.db.Exec(`INSERT OR REPLACE INTO devices (kid, token, created, last_seen) VALUES (?,?,?,?)`,
+		claims.KID, newTok, time.Now().Unix(), time.Now().Unix())
+	writeJSON(w, 200, map[string]interface{}{
+		"enabled": true, "recovery": codes, "device_token": newTok,
+	})
+}
+
+func (s *Server) twofaDisableHandler(w http.ResponseWriter, r *http.Request) {
+	claims, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	// подтвердить владение кодом/recovery
+	var req struct {
+		Code string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	secret, enabled := s.totpFor(claims.KID)
+	okCode := false
+	if enabled && s.checkTOTP(claims.KID, secret, req.Code) {
+		okCode = true
+	}
+	if !okCode && req.Code != "" {
+		res, err := s.db.Exec(`UPDATE recovery SET used = 1, used_at = ? WHERE kid = ? AND code = ? AND used = 0`,
+			time.Now().Unix(), claims.KID, strings.TrimSpace(req.Code))
+		if n, _ := res.RowsAffected(); err == nil && n == 1 {
+			okCode = true
+		}
+	}
+	if !okCode {
+		writeErr(w, 401, "wrong code")
+		return
+	}
+	s.db.Exec(`DELETE FROM totp WHERE kid = ?`, claims.KID)
+	s.db.Exec(`DELETE FROM recovery WHERE kid = ?`, claims.KID)
+	writeJSON(w, 200, map[string]interface{}{"disabled": true})
+}
+
+func (s *Server) twofaStatusHandler(w http.ResponseWriter, r *http.Request) {
+	claims, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	_, enabled := s.totpFor(claims.KID)
+	var ndev, nrec int
+	s.db.QueryRow(`SELECT COUNT(*) FROM devices WHERE kid = ?`, claims.KID).Scan(&ndev)
+	s.db.QueryRow(`SELECT COUNT(*) FROM recovery WHERE kid = ? AND used = 0`, claims.KID).Scan(&nrec)
+	writeJSON(w, 200, map[string]interface{}{
+		"enabled": enabled, "devices": ndev, "recovery_left": nrec,
+		"grace_until": s.cfg.TwoFAGrace,
+	})
+}
+
 func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Pubkey string `json:"pubkey"`
-		TS     int64  `json:"ts"`
-		Sig    string `json:"sig"`
+		Pubkey       string `json:"pubkey"`
+		TS           int64  `json:"ts"`
+		Sig          string `json:"sig"`
+		DeviceToken  string `json:"device_token,omitempty"`
+		TOTP         string `json:"totp,omitempty"`
+		RecoveryCode string `json:"recovery,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad request")
@@ -293,6 +593,14 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 	var hosts, caps []string
 	json.Unmarshal([]byte(hostsJSON), &hosts)
 	json.Unmarshal([]byte(capsJSON), &caps)
+
+	// 2FA-челлендж (до выпуска токена); разблокировка: device token, TOTP или
+	// recovery-код. Новорегистрируемые без секрета проходят, пока жив grace.
+	passed, devTok := s.twoFAChallenge(w, keyID, role, req.TOTP, req.RecoveryCode, req.DeviceToken)
+	if !passed {
+		return
+	}
+
 	exp := time.Now().Add(time.Hour)
 	claims := Claims{
 		KID:   keyID,
@@ -312,13 +620,21 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "token error")
 		return
 	}
-	writeJSON(w, 200, map[string]interface{}{
+	resp := map[string]interface{}{
 		"token": tok,
 		"role":  role,
 		"hosts": hosts,
 		"caps":  caps,
 		"exp":   exp.Unix(),
-	})
+	}
+	if devTok != "" {
+		resp["device_token"] = devTok
+	}
+	_, totpEnabled := s.totpFor(keyID)
+	if (role == "owner" || role == "admin") && !totpEnabled {
+		resp["2fa_warning"] = "2fa not enrolled: run `rsh 2fa init` now"
+	}
+	writeJSON(w, 200, resp)
 }
 
 // clientIP — публичный IP клиента (моён auth-сервера): для -t (право на tmp-папку).
@@ -365,7 +681,7 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 403, "host not allowed for this key")
 		return
 	}
-
+	role := claims.Role
 	// ttl-слоты: комментарий несёт время выдачи — старые неактивные слоты
 	// чистятся при следующем provision того же kid+host
 	targetComment := fmt.Sprintf("rt:%s:%s:%d", claims.KID, req.Host, time.Now().Unix())
@@ -374,22 +690,47 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "keygen: "+err.Error())
 		return
 	}
-	if err := s.provision(hcfg, tPub, false); err != nil {
+
+	respUser := hcfg.User
+	if role == "admin" {
+		// админ имеет право ssh только в chroot-песочницу на пк
+		if !hcfg.Sandbox {
+			writeErr(w, 403, "admin role: ssh allowed only to sandbox hosts (pc)")
+			return
+		}
+		user, err := sandboxUser(claims.KID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if err := s.provisionAdmin(hcfg, user, tPub, targetComment); err != nil {
+			writeErr(w, 500, "provision sandbox: "+err.Error())
+			return
+		}
+		respUser = user
+	} else if err := s.provision(hcfg, tPub, false); err != nil {
 		writeErr(w, 500, "provision target: "+err.Error())
 		return
 	}
 
 	resp := map[string]interface{}{
 		"host":        req.Host,
-		"user":        hcfg.User,
+		"user":        respUser,
 		"addr":        hcfg.Addr,
 		"port":        hcfg.Port,
 		"private_key": string(tPriv),
 		"client_ip":   clientIP(r),
 	}
+	if role == "admin" {
+		resp["sandbox"] = true
+	}
 
 	if !hcfg.Local && s.cfg.Jump != nil {
 		jumpComment := "rj:" + claims.KID
+		if role == "admin" {
+			// админу из джамп-слота запрещён -W куда-либо кроме pc:22
+			jumpComment = "rj:" + claims.KID + ":pc"
+		}
 		jPriv, jPub, err := genKeyPair(jumpComment)
 		if err != nil {
 			writeErr(w, 500, "jump keygen: "+err.Error())
@@ -400,8 +741,15 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "no vps host config for jump")
 			return
 		}
-		if err := s.provisionLocal(vps, jPub, true); err != nil {
-			writeErr(w, 500, "provision jump: "+err.Error())
+		jumpOpts := `command="/bin/false",restrict,port-forwarding,permitopen="127.0.0.1:2222" `
+		var err2 error
+		if role == "admin" {
+			err2 = s.provisionLocal(vps, jPub, jumpOpts)
+		} else {
+			err2 = s.provisionLocal(vps, jPub, "")
+		}
+		if err2 != nil {
+			writeErr(w, 500, "provision jump: "+err2.Error())
 			return
 		}
 		resp["jump"] = map[string]interface{}{
@@ -646,8 +994,9 @@ func (s *Server) netPeerHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) provision(hcfg *HostCfg, pubLine string, restricted bool) error {
 	if hcfg.Local {
-		return s.provisionLocal(hcfg, pubLine, restricted)
+		return s.provisionLocal(hcfg, pubLine, "")
 	}
+	_ = restricted
 	ak := hcfg.AKPath
 	if ak == "" {
 		ak = "~/.ssh/authorized_keys"
@@ -681,15 +1030,15 @@ func (s *Server) provision(hcfg *HostCfg, pubLine string, restricted bool) error
 	return nil
 }
 
-func (s *Server) provisionLocal(hcfg *HostCfg, pubLine string, restricted bool) error {
+func (s *Server) provisionLocal(hcfg *HostCfg, pubLine string, opts string) error {
 	ak := hcfg.AKPath
 	if ak == "" {
 		ak = "/root/.ssh/authorized_keys"
 	}
 	comment := extractComment(pubLine)
 	line := pubLine
-	if restricted {
-		line = `command="/bin/false",restrict,port-forwarding ` + pubLine
+	if opts != "" {
+		line = opts + pubLine
 	}
 	if err := os.MkdirAll(filepath.Dir(ak), 0o700); err != nil {
 		return err
@@ -817,6 +1166,10 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /v1/web/logout", s.webLogoutHandler)
 	mux.HandleFunc("GET /v1/admin/users", s.adminUsersHandler)
 	mux.HandleFunc("POST /v1/admin/users", s.adminUsersHandler)
+	mux.HandleFunc("POST /v1/2fa/init", s.twofaInitHandler)
+	mux.HandleFunc("POST /v1/2fa/confirm", s.twofaConfirmHandler)
+	mux.HandleFunc("POST /v1/2fa/disable", s.twofaDisableHandler)
+	mux.HandleFunc("GET /v1/2fa/status", s.twofaStatusHandler)
 	mux.HandleFunc("PATCH /v1/admin/users/{id}", s.adminUserUpdateHandler)
 	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.adminUserDeleteHandler)
 	mux.HandleFunc("GET /v1/console/status", s.consoleStatusHandler)

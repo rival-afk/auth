@@ -247,8 +247,9 @@ func capsRoleError(role string, caps []string) string {
 		if c == "console" && !isAdminRole(role) {
 			return "console is admin-only"
 		}
-		if c == "ssh" && !isOwnerRole(role) {
-			return "ssh is owner-only (root access)"
+		// ssh для admin = песочница chroot на пк; для owner = полный root
+		if c == "ssh" && !isAdminRole(role) {
+			return "ssh is admin/owner-only"
 		}
 	}
 	return ""
