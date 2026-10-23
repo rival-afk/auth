@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -192,6 +193,12 @@ CREATE TABLE IF NOT EXISTS devices (
   created INTEGER NOT NULL,
   last_seen INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (kid, token)
+);
+CREATE TABLE IF NOT EXISTS keysync (
+  host TEXT PRIMARY KEY,
+  blob TEXT NOT NULL,
+  win INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );`)
 	if err != nil {
 		return err
@@ -992,6 +999,86 @@ func (s *Server) netPeerHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{"label": label, "ip": ip, "updated_at": ts})
 }
 
+// keysyncHandler — шифрованный обмен pub-ключами между устройствами.
+// Сервер — глухой релей: не держит общий секрет и не может расшифровать блобы
+// (AES-256-GCM, ключ = SHA256("rsh-keysync-v1" || secret || window), окно 5 мин).
+// Каждый узел публикует свои pub-ключи и забирает чужие; приёмник сам дополняет
+// свой authorized_keys недостающими строками (append-only).
+func (s *Server) keysyncHandler(w http.ResponseWriter, r *http.Request) {
+	claims, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if !isAdminRole(claims.Role) {
+		writeErr(w, 403, "owner/admin only")
+		return
+	}
+	var req struct {
+		Host string `json:"host"`
+		Blob string `json:"blob"`
+		Win  int64  `json:"win"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+		writeErr(w, 400, "bad request")
+		return
+	}
+	if len(req.Blob) > 40<<10 {
+		writeErr(w, 413, "blob too large")
+		return
+	}
+	allowed := false
+	for _, h := range claims.Hosts {
+		if h == req.Host {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		writeErr(w, 403, "host not allowed for this key")
+		return
+	}
+	now := time.Now().Unix()
+	// upsert блоба публикующего узла
+	if req.Blob != "" && req.Host != "" {
+		if _, err := s.db.Exec(`INSERT INTO keysync (host, blob, win, updated_at) VALUES (?, ?, ?, ?)
+			ON CONFLICT(host) DO UPDATE SET blob=excluded.blob, win=excluded.win, updated_at=excluded.updated_at`,
+			req.Host, req.Blob, req.Win, now); err != nil {
+			writeErr(w, 500, "db: "+err.Error())
+			return
+		}
+	}
+	rows, err := s.db.Query(`SELECT host, blob, win, updated_at FROM keysync ORDER BY host`)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	type peer struct {
+		Host    string `json:"host"`
+		Blob    string `json:"blob"`
+		Win     int64  `json:"win"`
+		Updated int64  `json:"updated_at"`
+	}
+	var peers []peer
+	for rows.Next() {
+		var p peer
+		if err := rows.Scan(&p.Host, &p.Blob, &p.Win, &p.Updated); err != nil {
+			rows.Close()
+			writeErr(w, 500, "db: "+err.Error())
+			return
+		}
+		if p.Host == req.Host {
+			continue // чужие блобы: свой возвращать незачем
+		}
+		// блобы старше 2 ч считаем протухшими и не отдаём
+		if now-p.Updated > 7200 {
+			continue
+		}
+		peers = append(peers, p)
+	}
+	rows.Close()
+	writeJSON(w, 200, map[string]interface{}{"peers": peers, "now": now})
+}
+
 func (s *Server) provision(hcfg *HostCfg, pubLine string, restricted bool) error {
 	if hcfg.Local {
 		return s.provisionLocal(hcfg, pubLine, "")
@@ -1135,6 +1222,7 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /stats", s.statsJSONHandler)
 	mux.HandleFunc("GET /", s.rootHandler)
 	mux.HandleFunc("POST /v1/auth", s.authHandler)
+	mux.HandleFunc("POST /v1/keysync", s.keysyncHandler)
 	mux.HandleFunc("POST /v1/sshkey", s.sshkeyHandler)
 	mux.HandleFunc("GET /v1/admin/keys", s.adminKeysHandler)
 	mux.HandleFunc("POST /v1/admin/keys", s.adminKeysHandler)
