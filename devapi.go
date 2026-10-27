@@ -135,6 +135,8 @@ var devInfra = []map[string]string{
 }
 
 // devAge считывает возраст из профиль-конфига и возвращает готовую карту для JSON.
+// Наружу уходит только возраст; никакие даты (ДР, следующее ДР) не отдаём —
+// они приватные и лежат root-only ('/var/lib/rival/dev-profile.json', chmod 600).
 func devAge(cfg devCfg) (map[string]interface{}, bool) {
 	bday, err := time.Parse("2006-01-02", strings.TrimSpace(cfg.Birthday))
 	if err != nil {
@@ -153,17 +155,9 @@ func devAge(cfg devCfg) (map[string]interface{}, bool) {
 	if now.Before(thisYear) {
 		years--
 	}
-	nextBirthday := thisYear
-	if now.After(thisYear) || now.Equal(thisYear) {
-		nextBirthday = thisYear.AddDate(1, 0, 0)
-	}
-	daysAlive := int(now.Sub(b).Hours() / 24)
-	daysToBirthday := int(nextBirthday.Sub(now).Hours()/24) + 1
+	// наружу — только возраст: даты (ДР, след. ДР, дни жизни) не публикуем
 	return map[string]interface{}{
-		"years":            years,
-		"days_alive":       daysAlive,
-		"next_birthday":    nextBirthday.Format("2006-01-02"),
-		"days_to_birthday": daysToBirthday,
+		"years": years,
 	}, true
 }
 
