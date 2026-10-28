@@ -64,6 +64,13 @@ type Config struct {
 	TwoFAGrace int64 `json:"2fa_grace_until"`
 	// Песочницы админов (chroot на пк): префикс каталогов /srv/zsandbox/<user>.
 	SandboxPrefix string `json:"sandbox_prefix"`
+	// hwid-привязка device-токенов: при true токен, отданный одному устройству
+	// (hwid), с другого железа отклоняется (нужен повторный TOTP/recovery).
+	// false = только мягкая привязка (log) — для раскатки.
+	HWIDEnforce bool `json:"hwid_enforce"`
+	// Постоянные (вне ротыции) ключи, чьи входы ssh на hosts не считаются
+	// «неизвестным устройством» в /v1/keycheck: tunnel-ключ, deploy-ключ и т.п.
+	KnownKeys []string `json:"known_keys"`
 }
 
 type Server struct {
@@ -199,6 +206,13 @@ CREATE TABLE IF NOT EXISTS keysync (
   blob TEXT NOT NULL,
   win INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS keyfps (
+  fp TEXT PRIMARY KEY,
+  kid TEXT NOT NULL,
+  host TEXT NOT NULL,
+  hwid TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
 );`)
 	if err != nil {
 		return err
@@ -230,6 +244,27 @@ CREATE TABLE IF NOT EXISTS keysync (
 	}
 	if !hasUserID {
 		s.db.Exec(`ALTER TABLE keys ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`)
+	}
+	// hwid-привязка устройства: devices.hwid — привязывается при первом заходе,
+	// после этого несовпадение = чужое железо (смотри deviceOK / HWIDEnforce)
+	var devCols []string
+	drows, err := s.db.Query(`SELECT name FROM pragma_table_info('devices')`)
+	if err == nil {
+		defer drows.Close()
+		for drows.Next() {
+			var n string
+			drows.Scan(&n)
+			devCols = append(devCols, n)
+		}
+	}
+	hasHWID := false
+	for _, c := range devCols {
+		if c == "hwid" {
+			hasHWID = true
+		}
+	}
+	if !hasHWID {
+		s.db.Exec(`ALTER TABLE devices ADD COLUMN hwid TEXT NOT NULL DEFAULT ''`)
 	}
 	// role model: the ssh cap implies the owner tier (root access to hosts)
 	// историческая миграция отключена: раньше admin+ssh = owner (весь root).
@@ -395,19 +430,56 @@ func (s *Server) totpFor(kid string) (secret string, enabled bool) {
 	return sec, en != 0
 }
 
-func (s *Server) deviceOK(kid, token string) bool {
+// deviceOK проверяет device-токен и его привязку к железу (hwid).
+// hwid пустой (старый rsh) — только факт наличия токена. Токен без привязки
+// привязывается к первому устройству, с которого пришёл (soft-bind, ротация
+// ключей это не затрагивает — касается только device-токенов). Токен с
+// отличным hwid = тот же файл ключа на другом устройстве → отказ (при
+// HWIDEnforce) или мягкий лог; «потеря» устройства лечится повторным TOTP —
+// челлендж тогда честно просит 2fa (см. twoFAChallenge).
+func (s *Server) deviceOK(kid, token, hwid string) (bool, string) {
 	if token == "" {
-		return false
+		return false, "no device token"
 	}
-	r, err := s.db.Exec(`UPDATE devices SET last_seen = ? WHERE kid = ? AND token = ?`,
-		time.Now().Unix(), kid, token)
-	n, _ := r.RowsAffected()
-	return err == nil && n == 1
+	var stored string
+	err := s.db.QueryRow(`SELECT hwid FROM devices WHERE kid = ? AND token = ?`, kid, token).Scan(&stored)
+	if err == sql.ErrNoRows {
+		return false, "unknown device token"
+	}
+	if err != nil {
+		return false, "db error"
+	}
+	if hwid == "" || (stored != "" && stored != hwid) {
+		// json: разрешён любой вход с валидным токеном (привязку не перепроверяем)
+		if stored != "" && hwid != "" && stored != hwid {
+			if s.cfg.HWIDEnforce {
+				log.Printf("device kid=%s token=%s hwid mismatch: enforces deny", s8(kid), s8(token))
+				return false, "device bound to different hardware (hwid mismatch)"
+			}
+			log.Printf("device kid=%s token=%s hwid mismatch (soft)", s8(kid), s8(token))
+			s.db.Exec(`UPDATE devices SET last_seen = ? WHERE kid = ? AND token = ?`, time.Now().Unix(), kid, token)
+			return true, "mismatch"
+		}
+		s.db.Exec(`UPDATE devices SET last_seen = ? WHERE kid = ? AND token = ?`, time.Now().Unix(), kid, token)
+		return true, ""
+	}
+	if stored == hwid {
+		s.db.Exec(`UPDATE devices SET last_seen = ? WHERE kid = ? AND token = ?`, time.Now().Unix(), kid, token)
+		return true, ""
+	}
+	// stored пуст и hwid не пуст: первая привязка
+	res, err := s.db.Exec(`UPDATE devices SET hwid = ?, last_seen = ? WHERE kid = ? AND token = ?`,
+		hwid, time.Now().Unix(), kid, token)
+	if n, _ := res.RowsAffected(); err != nil || n != 1 {
+		return false, "bind failed"
+	}
+	log.Printf("device bound: kid=%s hwid=%s", s8(kid), s8(hwid))
+	return true, "bound"
 }
 
 // twoFAChallenge решает, пропускать ли вход: device-token, TOTP, recovery,
 // grace (пока секрет не включён). Возвращает (пропустить, новый device token).
-func (s *Server) twoFAChallenge(w http.ResponseWriter, kid, role string, totpCode, recoveryCode, devToken string) (bool, string) {
+func (s *Server) twoFAChallenge(w http.ResponseWriter, kid, role string, totpCode, recoveryCode, devToken, hwid string) (bool, string) {
 	secret, enabled := s.totpFor(kid)
 	mandatory := enabled || role == "owner" || role == "admin"
 
@@ -415,15 +487,19 @@ func (s *Server) twoFAChallenge(w http.ResponseWriter, kid, role string, totpCod
 		return true, ""
 	}
 	// доверенное устройство?
-	if devToken != "" && s.deviceOK(kid, devToken) {
-		return true, devToken
+	if devToken != "" {
+		if ok, _ := s.deviceOK(kid, devToken, hwid); ok {
+			return true, devToken
+		}
+		// токен есть, но не прошёл (чужое железо) — молча спускаемся к TOTP
+		// ниже: враг не узнаёт причину, законный владелец просто введёт код.
 	}
 	// TOTP (в т.ч. при включении, и если секрет есть, но ещё не confirmed
 	// — тогда это фактическое подтверждение первого кода)
 	if secret != "" && s.checkTOTP(kid, secret, totpCode) {
 		newTok := randToken(24)
-		s.db.Exec(`INSERT INTO devices (kid, token, created, last_seen) VALUES (?,?,?,?)`,
-			kid, newTok, time.Now().Unix(), time.Now().Unix())
+		s.db.Exec(`INSERT INTO devices (kid, token, hwid, created, last_seen) VALUES (?,?,?,?,?)`,
+			kid, newTok, hwid, time.Now().Unix(), time.Now().Unix())
 		if !enabled {
 			s.db.Exec(`UPDATE totp SET enabled = 1 WHERE kid = ?`, kid)
 		}
@@ -436,8 +512,8 @@ func (s *Server) twoFAChallenge(w http.ResponseWriter, kid, role string, totpCod
 		if err == nil {
 			if n, _ := res.RowsAffected(); n == 1 {
 				newTok := randToken(24)
-				s.db.Exec(`INSERT INTO devices (kid, token, created, last_seen) VALUES (?,?,?,?)`,
-					kid, newTok, time.Now().Unix(), time.Now().Unix())
+				s.db.Exec(`INSERT INTO devices (kid, token, hwid, created, last_seen) VALUES (?,?,?,?,?)`,
+					kid, newTok, hwid, time.Now().Unix(), time.Now().Unix())
 				return true, newTok
 			}
 		}
@@ -480,6 +556,7 @@ func (s *Server) twofaConfirmHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Code string `json:"code"`
+		HWID string `json:"hwid,omitempty"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	secret, _ := s.totpFor(claims.KID)
@@ -500,8 +577,8 @@ func (s *Server) twofaConfirmHandler(w http.ResponseWriter, r *http.Request) {
 		s.db.Exec(`INSERT INTO recovery (kid, code, used, used_at) VALUES (?,?,0,0)`, claims.KID, c)
 	}
 	newTok := randToken(24)
-	s.db.Exec(`INSERT OR REPLACE INTO devices (kid, token, created, last_seen) VALUES (?,?,?,?)`,
-		claims.KID, newTok, time.Now().Unix(), time.Now().Unix())
+	s.db.Exec(`INSERT OR REPLACE INTO devices (kid, token, hwid, created, last_seen) VALUES (?,?,?,?,?)`,
+		claims.KID, newTok, req.HWID, time.Now().Unix(), time.Now().Unix())
 	writeJSON(w, 200, map[string]interface{}{
 		"enabled": true, "recovery": codes, "device_token": newTok,
 	})
@@ -561,6 +638,7 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 		DeviceToken  string `json:"device_token,omitempty"`
 		TOTP         string `json:"totp,omitempty"`
 		RecoveryCode string `json:"recovery,omitempty"`
+		HWID         string `json:"hwid,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad request")
@@ -603,7 +681,7 @@ func (s *Server) authHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 2FA-челлендж (до выпуска токена); разблокировка: device token, TOTP или
 	// recovery-код. Новорегистрируемые без секрета проходят, пока жив grace.
-	passed, devTok := s.twoFAChallenge(w, keyID, role, req.TOTP, req.RecoveryCode, req.DeviceToken)
+	passed, devTok := s.twoFAChallenge(w, keyID, role, req.TOTP, req.RecoveryCode, req.DeviceToken, req.HWID)
 	if !passed {
 		return
 	}
@@ -667,6 +745,7 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Host string `json:"host"`
+		HWID string `json:"hwid,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad request")
@@ -759,6 +838,10 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "provision jump: "+err2.Error())
 			return
 		}
+		if jp, _, _, _, jperr := ssh.ParseAuthorizedKey([]byte(jPub)); jperr == nil {
+			s.db.Exec(`INSERT OR REPLACE INTO keyfps (fp, kid, host, hwid, created_at) VALUES (?,?,?,?,?)`,
+				ssh.FingerprintSHA256(jp), claims.KID, "vps", req.HWID, time.Now().Unix())
+		}
 		resp["jump"] = map[string]interface{}{
 			"addr":        s.cfg.Jump.Addr,
 			"port":        s.cfg.Jump.Port,
@@ -769,8 +852,82 @@ func (s *Server) sshkeyHandler(w http.ResponseWriter, r *http.Request) {
 
 	s.db.Exec(`INSERT INTO issued (id, key_id, host, ssh_pubkey, created_at) VALUES (?,?,?,?,?)`,
 		randID(), claims.KID, req.Host, tPub, time.Now().Unix())
+	// fingerprint выданного слота — вотчдог сверяет входы через /v1/keycheck:
+	// вход живым rt-слотом известен, «ручной» чужой ключ — нет
+	if parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(tPub)); err == nil {
+		s.db.Exec(`INSERT OR REPLACE INTO keyfps (fp, kid, host, hwid, created_at) VALUES (?,?,?,?,?)`,
+			ssh.FingerprintSHA256(parsed), claims.KID, req.Host, req.HWID, time.Now().Unix())
+	}
 
 	writeJSON(w, 200, resp)
+}
+
+// s8 — безопасное усечение для логов.
+func s8(v string) string {
+	if len(v) > 8 {
+		return v[:8]
+	}
+	return v
+}
+
+// keycheckHandler: знает ли auth такой ssh-ключ (по fingerprint)?
+// Только для loopback — зовёт локальный вотчдог vps при разборе входов ssh.
+// known = зарегистрированный ключ (caps ssh) ИЛИ живой ttl-слот (rt, ≤3 ч)
+// ИЛИ закреплённый в auth.json known_keys (tunnel/deploy и т.п.).
+// IP клиента НЕ согласовывается — IP динамические, доверие через железо.
+func (s *Server) keycheckHandler(w http.ResponseWriter, r *http.Request) {
+	switch ip := clientIP(r); ip {
+	case "127.0.0.1", "::1":
+	default:
+		writeErr(w, 403, "local only")
+		return
+	}
+	var req struct {
+		FP string `json:"fp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.FP) == "" {
+		writeErr(w, 400, "bad request")
+		return
+	}
+	req.FP = strings.TrimSpace(req.FP)
+	kind := ""
+	// 1) зарегистрированные ключи (owner/admin с капой ssh)
+	rows, err := s.db.Query(`SELECT pubkey, caps FROM keys`)
+	if err == nil {
+		for rows.Next() {
+			var pub, caps string
+			if rows.Scan(&pub, &caps) != nil || !strings.Contains(caps, "ssh") {
+				continue
+			}
+			if parsed, _, _, _, perr := ssh.ParseAuthorizedKey([]byte(normalizePub(pub))); perr == nil {
+				if ssh.FingerprintSHA256(parsed) == req.FP {
+					kind = "device"
+					break
+				}
+			}
+		}
+		rows.Close()
+	}
+	// 2) живые ttl-слоты rsh (ротация ключей — их не трогаем, они известны)
+	if kind == "" {
+		var n int
+		if s.db.QueryRow(`SELECT COUNT(*) FROM keyfps WHERE fp = ? AND created_at > ?`,
+			req.FP, time.Now().Add(-3*time.Hour).Unix()).Scan(&n); n > 0 {
+			kind = "slot"
+		}
+	}
+	// 3) закреплённые оператором (tunnel-ключ, deploy-ключ, ...)
+	if kind == "" {
+		for _, line := range s.cfg.KnownKeys {
+			if parsed, _, _, _, perr := ssh.ParseAuthorizedKey([]byte(normalizePub(line))); perr == nil {
+				if ssh.FingerprintSHA256(parsed) == req.FP {
+					kind = "known"
+					break
+				}
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]interface{}{"known": kind != "", "kind": kind})
 }
 
 func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
@@ -1224,6 +1381,7 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("POST /v1/auth", s.authHandler)
 	mux.HandleFunc("POST /v1/keysync", s.keysyncHandler)
 	mux.HandleFunc("POST /v1/sshkey", s.sshkeyHandler)
+	mux.HandleFunc("POST /v1/keycheck", s.keycheckHandler)
 	mux.HandleFunc("GET /v1/admin/keys", s.adminKeysHandler)
 	mux.HandleFunc("POST /v1/admin/keys", s.adminKeysHandler)
 	mux.HandleFunc("DELETE /v1/admin/keys/{id}", s.adminKeyDeleteHandler)
