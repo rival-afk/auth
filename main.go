@@ -599,6 +599,7 @@ func (s *Server) twofaDisableHandler(w http.ResponseWriter, r *http.Request) {
 	// подтвердить владение кодом/recovery
 	var req struct {
 		Code string `json:"code"`
+		HWID string `json:"hwid,omitempty"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	secret, enabled := s.totpFor(claims.KID)
@@ -619,7 +620,19 @@ func (s *Server) twofaDisableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	s.db.Exec(`DELETE FROM totp WHERE kid = ?`, claims.KID)
 	s.db.Exec(`DELETE FROM recovery WHERE kid = ?`, claims.KID)
-	writeJSON(w, 200, map[string]interface{}{"disabled": true})
+	// выдать новый device-токен: disable стирает секрет, и без токена owner
+	// (mandatory 2FA) запирал бы сам себя — челлендж было бы нечем пройти
+	var newTok string
+	if req.HWID != "" {
+		newTok = randToken(24)
+		s.db.Exec(`INSERT OR REPLACE INTO devices (kid, token, hwid, created, last_seen) VALUES (?,?,?,?,?)`,
+			claims.KID, newTok, req.HWID, time.Now().Unix(), time.Now().Unix())
+	}
+	resp := map[string]interface{}{"disabled": true}
+	if newTok != "" {
+		resp["device_token"] = newTok
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (s *Server) twofaStatusHandler(w http.ResponseWriter, r *http.Request) {
