@@ -959,6 +959,12 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 403, "admin only")
 		return
 	}
+	// caps-дисциплина: административные операции требуют cap console
+	// (ключи вида zen-agent с caps=["ssh"] их не имеют — только песочница)
+	if !hasCap(claims, "console") {
+		writeErr(w, 403, "console capability required")
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		rows, err := s.db.Query(`SELECT id, pubkey, role, hosts, label, caps, created_at FROM keys ORDER BY created_at`)

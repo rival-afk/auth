@@ -109,6 +109,10 @@ if [ -x /usr/bin/doas ] || [ -x /bin/doas ]; then
 fi
 echo "permit nopass $N as root cmd /usr/local/sbin/zs-pak" > "$R/rootfs/etc/doas.conf"
 echo "permit nopass $N as root cmd /usr/local/sbin/zs-pak" > "$R/rootfs/etc/doas.d/zs.conf"
+# proc обязателен (go ищет GOROOT через /proc/self/exe; без proc — «binary is
+# trimmed and GOROOT is not set»); dev/pts — для TTY-сессий (rsh -t)
+mount | grep -qs " $R/rootfs/proc " || mount -t proc -o nosuid,noexec,nodev proc "$R/rootfs/proc" 2>/dev/null || true
+mount | grep -qs " $R/rootfs/dev/pts " || { mkdir -p "$R/rootfs/dev/pts" && mount -t devpts -o mode=620,gid=5 devpts "$R/rootfs/dev/pts" 2>/dev/null || true; }
 mkdir -p /usr/local/sbin
 echo '` + strings.ReplaceAll(helper, "'", `'\''`) + `' > /usr/local/sbin/zs-pak
 chmod 755 /usr/local/sbin/zs-pak
