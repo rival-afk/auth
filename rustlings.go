@@ -38,9 +38,10 @@ func (s *Server) hostRouter(next http.Handler) http.Handler {
 		}
 		// Заглушка: субдомен *.rival-afk.com, который нигде не сконфигурирован
 		// (нет статики, прокси, и это не API-хост auth.*) → честная страница
-		// 404 на apex. Туннельные/TCP-сервисы (mindustry и т.п.) не по HTTP —
-		// их это не затрагивает.
-		if host != "auth.rival-afk.com" && strings.HasSuffix(host, ".rival-afk.com") {
+		// 404 на apex. mind.rival-afk.com исключён: у него своя лендинг
+		// Mindustry (mindPageHandler, mux-fallback rootHandler).
+		// Туннельные/TCP-сервисы (mindustry и т.п.) не по HTTP — их это не затрагивает.
+		if host != "auth.rival-afk.com" && host != "mind.rival-afk.com" && strings.HasSuffix(host, ".rival-afk.com") {
 			http.Redirect(w, r, "https://rival-afk.com/not-found/", http.StatusMovedPermanently)
 			return
 		}
