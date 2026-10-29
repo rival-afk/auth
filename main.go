@@ -988,6 +988,9 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 			Hosts  []string `json:"hosts"`
 			Label  string   `json:"label"`
 			Caps   []string `json:"caps"`
+			// bootstrap доверенного устройства для нового ключа (hwid)
+			// — затем, чтобы admin-ключ мог пройти 2FA-челлендж без секрета
+			HWID string `json:"hwid,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, 400, "bad request")
@@ -1042,7 +1045,16 @@ func (s *Server) adminKeysHandler(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 409, "key already exists or db error")
 			return
 		}
-		writeJSON(w, 200, map[string]interface{}{"id": id, "caps": req.Caps})
+		resp := map[string]interface{}{"id": id, "caps": req.Caps}
+		if req.HWID != "" {
+			// доверенное устройство сразу: без него новый admin не пройдёт
+			// челлендж (mandatory 2FA, секрета/recovery у ключа ещё нет)
+			devTok := randToken(24)
+			s.db.Exec(`INSERT INTO devices (kid, token, hwid, created, last_seen) VALUES (?,?,?,?,?)`,
+				id, devTok, req.HWID, time.Now().Unix(), time.Now().Unix())
+			resp["device_token"] = devTok
+		}
+		writeJSON(w, 200, resp)
 	default:
 		writeErr(w, 405, "method not allowed")
 	}
