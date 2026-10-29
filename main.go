@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/tls"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
@@ -71,6 +73,11 @@ type Config struct {
 	// Постоянные (вне ротыции) ключи, чьи входы ssh на hosts не считаются
 	// «неизвестным устройством» в /v1/keycheck: tunnel-ключ, deploy-ключ и т.п.
 	KnownKeys []string `json:"known_keys"`
+	// Cloudflare API-токен (Zone.DNS:Edit для зоны apex-домена). Если задан —
+	// autocert переходит на DNS-01 и добавляет wildcard *.rival-afk.com:
+	// ЛЮБОЙ субдомен получает валидный TLS и попадает на заглушку
+	// rival-afk.com/not-found (см. hostRouter). Пусто = как раньше.
+	DNSCFToken string `json:"dns_cf_token"`
 }
 
 type Server struct {
@@ -1479,16 +1486,41 @@ func main() {
 			Cache:      autocert.DirCache(cfg.ACMECache),
 			Email:      cfg.ACMEEmail,
 		}
+		// DNS-01 через Cloudflare: wildcard *.rival-afk.com — любой субдомен
+		// получает валидный TLS и попадает на заглушку /not-found (hostRouter).
+		var wcman *wildcardMan
+		if cfg.DNSCFToken != "" {
+			wcman = newWildcardMan(cfg)
+			log.Printf("dns-01 (cloudflare) включён: wildcard *.rival-afk.com")
+		}
 		go func() {
 			log.Printf("acme http-01 on :80")
 			if err := http.ListenAndServe(":80", m.HTTPHandler(nil)); err != nil {
 				log.Printf("acme http: %v", err)
 			}
 		}()
+		tlsCfg := m.TLSConfig()
+		if wcman != nil {
+			// fallback: неизвестный субдомен (нет своего сертификата) →
+			// отдаём wildcard *.rival-afk.com — handshake проходит, дальше
+			// hostRouter перекидывает на /not-found
+			base := tlsCfg.GetCertificate
+			tlsCfg.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				crt, err := base(hello)
+				if err == nil && crt != nil {
+					return crt, nil
+				}
+				if wc := wcman.get(); wc != nil {
+					return wc, nil
+				}
+				return nil, err
+			}
+			wcman.start(context.Background())
+		}
 		https := &http.Server{
 			Addr:      ":443",
 			Handler:   handler,
-			TLSConfig: m.TLSConfig(),
+			TLSConfig: tlsCfg,
 		}
 		log.Printf("https on :443 (autocert for %v)", domains)
 		if err := https.ListenAndServeTLS("", ""); err != nil {

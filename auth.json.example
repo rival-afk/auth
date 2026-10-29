@@ -33,5 +33,9 @@
     "addr": "0.0.0.0",
     "port": 22,
     "user": "root"
-  }
+  },
+  "hwid_enforce": true,
+  "known_keys": [
+    "ssh-ed25519 AAAA...REPLACE tunnel@phone-rot"
+  ]
 }

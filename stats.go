@@ -359,7 +359,18 @@ a:hover{color:var(--on-primary);background:var(--primary)}
 `
 
 func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		s.statsJSONHandler(w, r)
+		return
+	}
+	// mind.rival-afk.com — отдельная лендинг Mindustry-сервера (статус + подключение).
+	// /?format=json по-прежнему отдаёт полный status-JSON.
+	host := hostWithoutPort(strings.ToLower(strings.TrimSpace(r.Host)))
+	if host == "mind.rival-afk.com" && r.URL.Query().Get("format") != "json" {
+		s.mindPageHandler(w, r)
+		return
+	}
+	if r.URL.Query().Get("format") == "json" {
 		s.statsJSONHandler(w, r)
 		return
 	}
